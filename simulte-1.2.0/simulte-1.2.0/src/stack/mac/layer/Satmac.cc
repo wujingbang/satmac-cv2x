@@ -1,820 +1,765 @@
-
+//#ifdef LteSATMAC
 /* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
-#include "Satmac.h"
 
-#include "ns3/assert.h"
-#include "ns3/enum.h"
-#include "ns3/log.h"
-#include "ns3/simulator.h"
-#include "tdma-satmac.h"
-#include "tdma-mac.h"
-#include "tdma-mac-low.h"
-#include "satmac-packet.h"
-#include "ns3/abort.h"
-#include "ns3/integer.h"
-#include "ns3/double.h"
-#include "ns3/string.h"
-#include "ns3/wifi-utils.h"
 #include <map>
-
 #include <string>
 #include <fstream>
-#include "ns3/mobility-module.h"
+#include "stack/mac/buffer/harq/LteHarqBufferRx.h"
+#include "stack/mac/buffer/LteMacQueue.h"
+#include "stack/mac/buffer/harq_d2d/LteHarqBufferRxD2DMirror.h"
+#include "Satmac.h"
+#include "stack/mac/scheduler/LteSchedulerUeUl.h"
+#include "stack/phy/layer/Subchannel.h"
+#include "stack/mac/amc/AmcPilotD2D.h"
+#include "common/LteCommon.h"
+#include "stack/phy/layer/LtePhyBase.h"
+#include "inet/networklayer/common/InterfaceEntry.h"
+#include "inet/common/ModuleAccess.h"
+#include "inet/networklayer/ipv4/IPv4InterfaceData.h"
+#include "stack/mac/amc/LteMcs.h"
 //#include "ns3/random-variable-stream.h"
 //#include "ns3/rng-seed-manager.h"
 
-NS_LOG_COMPONENT_DEFINE ("TdmaSatmac");
+Define_Module(Satmac);
 
-#define MY_DEBUG(x) \
-  NS_LOG_DEBUG (Simulator::Now () << " " << this << " " << x)
-
-namespace ns3 {
-NS_OBJECT_ENSURE_REGISTERED (TdmaSatmac);
-
-Time
-TdmaSatmac::GetDefaultSlotTime (void)
-{
-  return MicroSeconds (1000); // C-V2X：SimTime(int64_t value, SimTimeUnit unit);
-}
-
-Time
-TdmaSatmac::GetDefaultGuardTime (void)
-{
-  return MicroSeconds (5);  // C-V2X SIMTIME_MS
-}
-
-// 暂时没在C-V2X中找到
-DataRate
-TdmaSatmac::GetDefaultDataRate (void)
-{
-  NS_LOG_DEBUG ("Setting default");
-  return DataRate ("12000000b/s");  // 需要改
-}
-
-int TdmaSatmac::GetDefaultFrameLen(void)
-{
-  return 64;
-}
-
-int TdmaSatmac::GetDefaultSlotLife(void)
-{
-  return 3;
-}
-
-int TdmaSatmac::GetDefaultC3HThreshold(void)
-{
-  return 2;
-}
-int TdmaSatmac::GetDefaultAdjThreshold(void)
-{
-  return 5;
-}
-int TdmaSatmac::GetDefaultRandomBchIfSingle(void)
-{
-  return 1;
-}
-
-int TdmaSatmac::GetDefaultChooseBchRandomSwitch(void)
-{
-  return 1;
-}
-
-int TdmaSatmac::GetDefaultAdjEnable(void)
-{
-  return 1;
-}
-int TdmaSatmac::GetDefaultAdjFrameEnable(void)
-{
-  return 1;
-}
-
-int TdmaSatmac::GetDefaultAdjFrameLowerBound(void)
-{
-  return 32;
-}
-
-int TdmaSatmac::GetDefaultAdjFrameUpperBound(void)
-{
-  return 128;
-}
-
-int TdmaSatmac::GetDefaultSlotMemory(void)
-{
-  return 1;
-}
-double TdmaSatmac::GetDefaultFrameadjCutRatioEhs()
-{
-    return 0.6;
-}
-double TdmaSatmac::GetDefaultFrameadjCutRatioThs()
-{
-    return 0.4;
-}
-double TdmaSatmac::GetDefaultFrameadjExpRatio()
-{
-    return 0.9;
-}
 /*************************************************************
  * Tdma Controller Class Functions
  ************************************************************/
 
-// 在哪里调用了GetTypeId (void)
-TypeId
-TdmaSatmac::GetTypeId (void)
+void Satmac::initialize(int stage)
 {
-  static TypeId tid = TypeId ("ns3:TdmaSatmac")
-    .SetParent<TdmaMac> ()
-    .AddConstructor<TdmaSatmac> ()
-    .AddAttribute ("DataRate",
-                   "The default data rate for point to point links",
-                   DataRateValue (GetDefaultDataRate ()),
-                   MakeDataRateAccessor (&TdmaSatmac::SetDataRate,
-                                         &TdmaSatmac::GetDataRate),
-                   MakeDataRateChecker ())
-    .AddAttribute ("SlotTime", "The duration of a Slot in microseconds.",
-                   TimeValue (GetDefaultSlotTime ()),
-                   MakeTimeAccessor (&TdmaSatmac::SetSlotTime,
-                                     &TdmaSatmac::GetSlotTime),
-                   MakeTimeChecker ())
-    .AddAttribute ("GuardTime", "GuardTime between TDMA slots in microseconds.",
-                   TimeValue (GetDefaultGuardTime ()),
-                   MakeTimeAccessor (&TdmaSatmac::SetGuardTime,
-                                     &TdmaSatmac::GetGuardTime),
-                   MakeTimeChecker ())
-    .AddAttribute ("InterFrameTime", "The wait time between consecutive tdma frames.",
-                   TimeValue (MicroSeconds (0)),
-                   MakeTimeAccessor (&TdmaSatmac::SetInterFrameTimeInterval,
-                                     &TdmaSatmac::GetInterFrameTimeInterval),
-                   MakeTimeChecker ())
+    if (stage != inet::INITSTAGE_NETWORK_LAYER_3)
+        LteMacUeRealisticD2D::initialize(stage);
+    if (stage == inet::INITSTAGE_LOCAL)
+        {
+           //"DataRate"
 
-//    .AddAttribute ("STI", "",
-//                   IntegerValue (-1),
-//                   MakeIntegerAccessor (&TdmaSatmac::SetGlobalSti,
-//                                     &TdmaSatmac::GetGlobalSti),
-//                   MakeIntegerChecker<int> (0,9999))
-      .AddAttribute ("FrameLen", "",
-                     IntegerValue (GetDefaultFrameLen()),
-                     MakeIntegerAccessor (&TdmaSatmac::SetFrameLen,
-                                       &TdmaSatmac::GetFrameLen),
-                     MakeIntegerChecker<int> (1,129))
-      .AddAttribute ("SlotLife", "",
-                     IntegerValue (GetDefaultSlotLife()),
-                     MakeIntegerAccessor (&TdmaSatmac::SetSlotLife,
-                                       &TdmaSatmac::GetSlotLife),
-                     MakeIntegerChecker<int> (0,20))
-      .AddAttribute ("C3HThreshold", "",
-                     IntegerValue (GetDefaultC3HThreshold()),
-                     MakeIntegerAccessor (&TdmaSatmac::SetC3HThreshold,
-                                       &TdmaSatmac::GetC3HThreshold),
-                     MakeIntegerChecker<int> (0,10))
-      .AddAttribute ("AdjThreshold", "",
-                     IntegerValue (GetDefaultAdjThreshold()),
-                     MakeIntegerAccessor (&TdmaSatmac::SetAdjThreshold,
-                                       &TdmaSatmac::GetAdjThreshold),
-                     MakeIntegerChecker<int> (0,50))
-      .AddAttribute ("RandomBchIfSingle", "",
-                     IntegerValue (GetDefaultRandomBchIfSingle()),
-                     MakeIntegerAccessor (&TdmaSatmac::SetRandomBchIfSingle,
-                                       &TdmaSatmac::GetRandomBchIfSingle),
-                     MakeIntegerChecker<int> (0,1))
-      .AddAttribute ("ChooseBchRandomSwitch", "",
-                     IntegerValue (GetDefaultChooseBchRandomSwitch()),
-                     MakeIntegerAccessor (&TdmaSatmac::setChooseBchRandomSwitch,
-                                       &TdmaSatmac::getChooseBchRandomSwitch),
-                     MakeIntegerChecker<int> (0,1))
-      .AddAttribute ("VemacMode", "",
-                     IntegerValue (0),
-                     MakeIntegerAccessor (&TdmaSatmac::setVemacMode,
-                                       &TdmaSatmac::getVemacMode),
-                     MakeIntegerChecker<int> (0,1))
-      .AddAttribute ("AdjEnable", "",
-                     IntegerValue (GetDefaultAdjEnable()),
-                     MakeIntegerAccessor (&TdmaSatmac::SetAdjEnable,
-                                       &TdmaSatmac::GetAdjEnable),
-                     MakeIntegerChecker<int> (0,1))
-      .AddAttribute ("AdjFrameEnable", "",
-                     IntegerValue (GetDefaultAdjFrameEnable()),
-                     MakeIntegerAccessor (&TdmaSatmac::SetAdjFrameEnable,
-                                       &TdmaSatmac::GetAdjFrameEnable),
-                     MakeIntegerChecker<int> (0,1))
-      .AddAttribute ("AdjFrameLowerBound", "",
-                     IntegerValue (GetDefaultAdjFrameLowerBound()),
-                     MakeIntegerAccessor (&TdmaSatmac::SetAdjFrameLowerBound,
-                                       &TdmaSatmac::GetAdjFrameLowerBound),
-                     MakeIntegerChecker<int> (0,129))
-      .AddAttribute ("AdjFrameUpperBound", "",
-                     IntegerValue (GetDefaultAdjFrameUpperBound()),
-                     MakeIntegerAccessor (&TdmaSatmac::SetAdjFrameUpperBound,
-                                       &TdmaSatmac::GetAdjFrameUpperBound),
-                     MakeIntegerChecker<int> (0,129))
-      .AddAttribute ("SlotMemory", "",
-                     IntegerValue (GetDefaultSlotMemory()),
-                     MakeIntegerAccessor (&TdmaSatmac::SetSlotMemory,
-                                       &TdmaSatmac::GetSlotMemory),
-                     MakeIntegerChecker<int> (0,1))
-      .AddAttribute ("FrameadjExpRatio", "",
-                     DoubleValue (GetDefaultFrameadjExpRatio()),
-                     MakeDoubleAccessor (&TdmaSatmac::setFrameadjExpRatio,
-                                       &TdmaSatmac::getFrameadjExpRatio),
-                     MakeDoubleChecker<double> (0,1))
-      .AddAttribute ("FrameadjCutRatioThs", "",
-                     DoubleValue (GetDefaultFrameadjCutRatioThs()),
-                     MakeDoubleAccessor (&TdmaSatmac::setFrameadjCutRatioThs,
-                                       &TdmaSatmac::getFrameadjCutRatioThs),
-                     MakeDoubleChecker<double> (0,1))
-      .AddAttribute ("FrameadjCutRatioEhs", "",
-                     DoubleValue (GetDefaultFrameadjCutRatioEhs()),
-                     MakeDoubleAccessor (&TdmaSatmac::setFrameadjCutRatioEhs,
-                                       &TdmaSatmac::getFrameadjCutRatioEhs),
-                     MakeDoubleChecker<double> (0,1))
-      .AddAttribute ("LPFTraceFile", "",
-                     StringValue ("lpf-output.txt"),
-                     MakeStringAccessor (&TdmaSatmac::setTraceOutFile),
-                     MakeStringChecker())
+           subchannelSize_ = par("subchannelSize");
+           int64_t temp_slotTime = par("SlotTime");
+           m_slotTime = SimTime(temp_slotTime,SIMTIME_US);
+           m_frame_len = par("FrameLen");
+           slot_lifetime_frame_ = par("SlotLife");
+           c3hop_threshold_ = par("C3HThreshold");
+           adj_free_threshold_ = par("AdjThreshold");
+           random_bch_if_single_switch_ = par("RandomBchIfSingle");
+           choose_bch_random_switch_ = par("ChooseBchRandomSwitch");
+           //vemac_mode_ = par("VemacMode");
+           adj_ena_ = par("AdjEnable");
+           //adj_frame_ena_ = par("AdjFrameEnable");
+           adj_frame_lower_bound_ = par("AdjFrameLowerBound");
+           adj_frame_upper_bound_ = par("AdjFrameUpperBound");
+           slot_memory_ = par("SlotMemory");
+           frameadj_exp_ratio_ = par("FrameadjExpRatio");
+           frameadj_cut_ratio_ths_ = par("FrameadjCutRatioThs");
+           frameadj_cut_ratio_ehs_ = par("FrameadjCutRatioEhs");
 
-    // Added to trace the transmission of v2x message
-    .AddTraceSource ("BCHTrace",
-                     "trace to track the announcement of bch messages",
-                     MakeTraceSourceAccessor (&TdmaSatmac::m_BCHTrace),
-                     "ns3::TdmaSatmac::BCHTracedCallback");
-  return tid;
+           usePreconfiguredTxParams_ = par("usePreconfiguredTxParams");
+           reselectAfter_ = par("reselectAfter");
+           global_sti = nodeId_;
+             //NS_LOG_FUNCTION (this); // 需要改
+             //m_traceOutFile = "lpf-output.txt";
+             m_wifimaclow_flag = 0;
+
+             adj_single_slot_ena_ = 0;
+             bch_slot_lock_ = 5;
+             adj_ena_ = 1;
+             adj_free_threshold_ = 5;
+             adj_frame_ena_ = 1;
+             adj_frame_lower_bound_  = 32;
+             adj_frame_upper_bound_ = 128;
+             slot_memory_ = 1;
+             frameadj_cut_ratio_ths_ = 0.4;
+             frameadj_cut_ratio_ehs_ = 0.6;
+             frameadj_exp_ratio_ = 0.9;
+             testmode_init_flag_ = 0;
+             random_bch_if_single_switch_ = 0;
+             choose_bch_random_switch_ = 1;
+             slot_adj_candidate_ = -1;
+
+             vemac_mode_ = 0;
+
+           //  frameadj_cut_ratio_ths_ = 0.4;
+           //  frameadj_cut_ratio_ehs_ = 0.6;
+           //  frameadj_exp_ratio_ = 0.9;
+
+               total_slot_count_ = 0;
+               slot_count_ = 0;
+               slot_num_ = (slot_count_+1)% m_frame_len; //slot_num_初始化为当前的下一个时隙。
+
+               global_psf = 0;
+               collected_fi_ = new Frame_info(512, 1);  //帧长=512
+               collected_fi_->sti = nodeId_;
+               received_fi_list_= NULL;
+
+               node_state_ = NODE_INIT;
+               slot_state_ = BEGINING;
+               collision_count_ = 0;
+               localmerge_collision_count_ = 0;
+               request_fail_times = 0;
+               waiting_frame_count = 0;
+               frame_count_ = 0;
+               this->enable=0;
+               this->packet_sended = 0;
+               this->packet_received =0;
+
+               recv_fi_count_ = 0;
+               send_fi_count_ = 0;
+
+               currentCw_=0;
+               missedTransmissions_=0;
+               //currentCbrIndex_ = defaultCbrIndex_;
+
+               grantStartTime          = registerSignal("grantStartTime");
+               grantBreak              = registerSignal("grantBreak");
+               grantBreakTiming        = registerSignal("grantBreakTiming");
+               grantBreakSize          = registerSignal("grantBreakSize");
+               droppedTimeout          = registerSignal("droppedTimeout");
+               grantBreakMissedTrans   = registerSignal("grantBreakMissedTrans");
+               missedTransmission      = registerSignal("missedTransmission");
+               selectedMCS             = registerSignal("selectedMCS");
+               selectedSubchannelIndex = registerSignal("selectedSubchannelIndex");
+               selectedNumSubchannels  = registerSignal("selectedNumSubchannels");
+               maximumCapacity         = registerSignal("maximumCapacity");
+               grantRequests           = registerSignal("grantRequests");
+               packetDropDCC           = registerSignal("packetDropDCC");
+               macNodeID               = registerSignal("macNodeID");
+
+             //  std::cout<<"Start time:" << Simulator::Now().GetMicroSeconds() << "ID: " << this->GetGlobalSti() << std::endl;
+             //NanoSeconds
+
+               m_start_delay_frames = 0;
+               //m_start_delay_frames = m_uniformRandomVariable->GetInteger(0,10);
+               location_initialed_ = false;
+               direction_initialed_ = false;
+           //"LPFTraceFile"
+        }
+        else if (stage == inet::INITSTAGE_NETWORK_LAYER_3)
+        {
+            deployer_ = getDeployer();
+            //numAntennas_ = getNumAntennas();
+            mcsScaleD2D_ = deployer_->getMcsScaleUl();
+            d2dMcsTable_.rescale(mcsScaleD2D_);
+
+            if (usePreconfiguredTxParams_)
+            {
+                preconfiguredTxParams_ = getPreconfiguredTxParams();
+            }
+
+            // LTE UE Section
+            nodeId_ = getAncestorPar("macNodeId");
+
+            emit(macNodeID, nodeId_);
+
+            /* Insert UeInfo in the Binder */
+            ueInfo_ = new UeInfo();
+            ueInfo_->id = nodeId_;            // local mac ID
+            ueInfo_->cellId = cellId_;        // cell ID
+            ueInfo_->init = false;            // flag for phy initialization
+            ueInfo_->ue = this->getParentModule()->getParentModule();  // reference to the UE module
+
+            // Get the Physical Channel reference of the node
+            ueInfo_->phy = check_and_cast<LtePhyBase*>(ueInfo_->ue->getSubmodule("lteNic")->getSubmodule("phy"));
+
+            binder_->addUeInfo(ueInfo_);
+        }
 }
 
-TdmaSatmac::TdmaSatmac ()
+Satmac::Satmac ()
 {
-  global_sti = 599;
-  NS_LOG_FUNCTION (this); // 需要改
-  //m_traceOutFile = "lpf-output.txt";
-  m_wifimaclow_flag = 0;
-  m_low = CreateObject<TdmaMacLow> ();  // 需要改 --- 物理层
-  m_queue = CreateObject<TdmaMacQueue> ();// 需要改 对应 C-V2X中的队列
-  m_queue->SetTdmaMacTxDropCallback (MakeCallback (&TdmaSatmac::NotifyTxDrop, this));
-  m_uniformRandomVariable = CreateObject<UniformRandomVariable> (); // 需要改 创建了一个随机数变量 --- C-V2X中intuniform函数
-  m_transmissionListener = new TransmissionListenerUseless (); // 需要改 继承了Txop类
 
-  adj_single_slot_ena_ = 0;
-  bch_slot_lock_ = 5;
-  adj_ena_ = 1;
-  adj_free_threshold_ = 5;
-  adj_frame_ena_ = 1;
-  adj_frame_lower_bound_  = 32;
-  adj_frame_upper_bound_ = 128;
-  slot_memory_ = 1;
-  frameadj_cut_ratio_ths_ = 0.4;
-  frameadj_cut_ratio_ehs_ = 0.6;
-  frameadj_exp_ratio_ = 0.9;
-  testmode_init_flag_ = 0;
-  random_bch_if_single_switch_ = 0;
-  choose_bch_random_switch_ = 1;
-  slot_adj_candidate_ = -1;
 
-  vemac_mode_ = 0;
 
-//  frameadj_cut_ratio_ths_ = 0.4;
-//  frameadj_cut_ratio_ehs_ = 0.6;
-//  frameadj_exp_ratio_ = 0.9;
-
-  m_queue->SetMacPtr (this); // 需要改
-  m_low->SetRxCallback (MakeCallback (&TdmaSatmac::Receive, this)); // 需要改
-  TdmaMac::DoInitialize (); // 需要改 --- C-V2X中初始化的操作
 }
 
-TdmaSatmac::~TdmaSatmac ()
+Satmac::~Satmac ()
 {
-  m_channel = 0; // 需要改
-  m_bps = 0; // 需要改
 }
 
-//类似于C-V2X中的初始化
-void
-TdmaSatmac::Start (void)
+void Satmac::handleMessage(cMessage *msg)
 {
-  NS_LOG_FUNCTION (this); // 需要改
-  total_slot_count_ = 0;
-  slot_count_ = 0;
-  slot_num_ = (slot_count_+1)% m_frame_len; //slot_num_初始化为当前的下一个时隙。
+    if (msg->isSelfMessage())
+    {
+        LteMacUeRealisticD2D::handleMessage(msg);
+        return;
+    }
 
-  global_psf = 0;
-  collected_fi_ = new Frame_info(512);  //帧长=512
-  collected_fi_->sti = this->global_sti;
-  received_fi_list_= NULL;
+    cPacket* pkt = check_and_cast<cPacket *>(msg);  //类型转换 转换成 cMessage 类型
+    cGate* incoming = pkt->getArrivalGate(); //返回消息发送的门和到达的门的指针。
+    if (incoming == down_[IN])
+    {
 
-  node_state_ = NODE_INIT;
-  slot_state_ = BEGINING;
-  collision_count_ = 0;
-  localmerge_collision_count_ = 0;
-  request_fail_times = 0;
-  waiting_frame_count = 0;
-  frame_count_ = 0;
-  this->enable=0;
-  this->packet_sended = 0;
-  this->packet_received =0;
+        UserControlInfo* lteInfo = check_and_cast<UserControlInfo*>(msg->getControlInfo());
+        if (lteInfo->getFrameType() == SATMACPKT)
+        {
+            SatmacPacket* satmacPkt = check_and_cast<SatmacPacket*>(msg);
+            int recv_fi_frame_fi = 0;
+            Frame_info *fi_recv;
 
-  recv_fi_count_ = 0;
-  send_fi_count_ = 0;
+            if (adj_frame_ena_)
+                recv_fi_frame_fi = satmacPkt->getFrameLength();
+            else
+                recv_fi_frame_fi = m_frame_len;
 
-//  std::cout<<"Start time:" << Simulator::Now().GetMicroSeconds() << "ID: " << this->GetGlobalSti() << std::endl;
-//NanoSeconds
+            fi_recv = this->get_new_FI(recv_fi_frame_fi);
+            fi_recv->sti = satmacPkt->getGlobleSti();
+            fi_recv->frame_len = recv_fi_frame_fi;
+            fi_recv->recv_slot = this->slot_count_;
+            fi_recv->valid_time = this->m_frame_len;
+            fi_recv->remain_time = fi_recv->valid_time;
 
-  //m_start_delay_frames = 0;
-  //m_start_delay_frames = m_uniformRandomVariable->GetInteger(0,10);
-  int starttime = 1;
-  location_initialed_ = false;
-  direction_initialed_ = false;
-  //std::cout<<"Start time:" << m_start_delay_frames << " ID: " << this->GetGlobalSti() << std::endl;
-  //经过starttime的时间，调用TdmaSatmac::slotHandler
-  Simulator::Schedule (MilliSeconds (starttime),&TdmaSatmac::slotHandler, this);
-  //slotHandler();
+            fi_recv->slot_describe[0][0].busy = 1;
+            //获取slot_tag
+            slot_tag **fi_local_= fi_recv->slot_describe;
+            for(int i = 0; i < recv_fi_frame_fi; i++)
+            {
+                for(int j = 0; j < m_channel_num; j++)
+                {
+                    fi_local_[i][j].busy = satmacPkt->getSlotTag()[i][j].busy;
+                    fi_local_[i][j].sti = satmacPkt->getSlotTag()[i][j].sti;
+                    fi_local_[i][j].count_2hop = satmacPkt->getSlotTag()[i][j].count_2hop;
+                    fi_local_[i][j].psf = satmacPkt->getSlotTag()[i][j].psf;
+                }
+            }
+
+            EV<<"SATMAC: received satmacPkt ！" <<endl;
+            EV << "From node " << satmacPkt->getGlobleSti()<<endl;
+            EV << "Frame length is " << satmacPkt->getFrameLength()<<endl;
+            EV << "This is FI information:" << endl;
+            for(int i = 0; i < recv_fi_frame_fi; i++)
+            {
+                for(int j = 0; j < m_channel_num; j++)
+                {
+                    EV << "This slot " <<"[" << i << "][" << m_channel_num - 1 << "]" << "is occuried by " << fi_local_[i][j].sti << "\t"
+                            << "2HOP is " << fi_local_[i][j].count_2hop<< endl;
+                }
+            }
+            delete pkt;
+            return;
+        }
+
+    }
+    // 上层来的数据先存储起来
+//    if (incoming == up_[IN]&&nodeId_==1025)
+//        cout<<" "<<endl;
+    LteMacUeRealisticD2D::handleMessage(msg);
 }
 
-//将Start()函数合并到C-V2X的初始化函数当中
-void
-TdmaSatmac::Initialize ()
+void Satmac::handleSelfMessage()
 {
-  NS_LOG_FUNCTION_NOARGS ();
-  Start();
+    EV << "SATMAC: slotHandler " << endl;
+
+    EV << "当前节点ID:" << nodeId_ << endl;
+
+
+    EV << "----- UE MAIN LOOP -----" << endl;
+
+    // 从 RX 的 HARQ 缓冲区中提取 phy 层发送过来的 pdu 并发送给 RLC 层
+    HarqRxBuffers::iterator hit = harqRxBuffers_.begin();
+    HarqRxBuffers::iterator het = harqRxBuffers_.end();
+    LteMacPdu *pdu = NULL;
+    std::list<LteMacPdu*> pduList;
+
+    for (; hit != het; ++hit)
+    {
+        pduList=hit->second->extractCorrectPdus();
+        while (! pduList.empty())
+        {
+            pdu=pduList.front();
+            pduList.pop_front();
+            macPduUnmake(pdu);
+        }
+    }
+
+    EV << NOW << "LteMacUeRealistic::handleSelfMessage " << nodeId_ << " - HARQ process " << (unsigned int)currentHarq_ << endl;
+
+    slotHandler();
+    SatmacSchedulingGrant* satmacGrant = dynamic_cast<SatmacSchedulingGrant*>(schedulingGrant_);
+    //satmacGrant = NULL;
+    if (satmacGrant == NULL)
+    {
+        EV << NOW << " LteMacVUeMode4::handleSelfMessage " << nodeId_ << " NO configured grant" << endl;
+
+        // No configured Grant simply continue
+        // 没有配置授权，只需继续
+    }
+    else
+    {
+        if (--periodCounter_>0 && !satmacGrant->getFirstTransmission())
+        {
+           return;
+        }
+        else if(periodCounter_ <= 0)
+        {
+            emit(grantBreak, 1);
+            satmacGrant->setExpiration(0);
+            expiredGrant_ = true;
+        }
+    }
+    bool requestSdu = false;
+    if (satmacGrant != NULL) // if a grant is configured
+    {
+        if (satmacGrant->getFirstTransmission())
+        {
+            satmacGrant->setFirstTransmission(false);
+        }
+        if(!firstTx)
+        {
+            EV << "\t currentHarq_ counter initialized " << endl;
+            firstTx=true;
+            // the eNb will receive the first pdu in 2 TTI, thus initializing acid to 0
+            // currentHarq_ = harqRxBuffers_.begin()->second->getProcesses() - 2;
+            currentHarq_ = UE_TX_HARQ_PROCESSES - 2;
+        }
+        EV << "\t " << schedulingGrant_ << endl;
+
+        EV << NOW << " LteMacVUeMode4::handleSelfMessage " << nodeId_ << " entered scheduling" << endl;
+
+        bool retx = false;
+        bool availablePdu = false;
+
+        HarqTxBuffers::iterator it2;
+        LteHarqBufferTx * currHarq;
+        for(it2 = harqTxBuffers_.begin(); it2 != harqTxBuffers_.end(); it2++)
+        {
+            EV << "\t Looking for retx in acid " << (unsigned int)currentHarq_ << endl;
+            currHarq = it2->second;
+
+            // check if the current process has unit ready for retx
+            // 检查当前流程是否已准备好进行retx
+            retx = currHarq->getProcess(currentHarq_)->hasReadyUnits();
+            CwList cwListRetx = currHarq->getProcess(currentHarq_)->readyUnitsIds();
+
+            if (it2->second->isSelected())
+            {
+                LteHarqProcessTx* selectedProcess = it2->second->getSelectedProcess();
+                // Ensure that a pdu is not already on the HARQ buffer awaiting sending.
+                // 确保pdu尚未在HARQ缓冲区上等待发送
+                if (selectedProcess != NULL)
+                {
+                    for (int cw=0; cw<MAX_CODEWORDS; cw++)
+                    {
+                        if (selectedProcess->getPduLength(cw) != 0)
+                        {
+                            availablePdu = true;
+                        }
+                    }
+                }
+            }
+
+            EV << "\t [process=" << (unsigned int)currentHarq_ << "] , [retx=" << ((retx)?"true":"false")
+               << "] , [n=" << cwListRetx.size() << "]" << endl;
+
+            // if a retransmission is needed
+            if(retx)
+            {
+                UnitList signal;
+                signal.first=currentHarq_;
+                signal.second = cwListRetx;
+                currHarq->markSelected(signal,schedulingGrant_->getUserTxParams()->getLayers().size());
+            }
+        }
+        // if no retx is needed, proceed with normal scheduling
+        // TODO: This may yet be changed to appear after MCS selection, issue is that if you pick max then you might get more sdus then you want
+        // Basing it on the previous mcs value is at least more realistic as to the size of the pdu you will get.
+        if(!retx && !availablePdu)
+        {
+            scheduleList_ = lcgScheduler_->schedule();
+            bool sent = macSduRequest();
+
+            if (!sent)
+            {
+                macPduMake();
+            }
+
+            requestSdu = sent;
+        }
+        // Message that triggers flushing of Tx H-ARQ buffers for all users
+        // 触发刷新所有用户的Tx H-ARQ缓冲区的消息
+        // This way, flushing is performed after the (possible) reception of new MAC PDUs
+        // 这样，在（可能）接收到新的MAC PDU之后执行冲洗
+        cMessage* flushHarqMsg = new cMessage("flushHarqMsg");
+        flushHarqMsg->setSchedulingPriority(1);        // after other messages
+        scheduleAt(NOW, flushHarqMsg);
+    }
+    unsigned int purged =0;
+    // purge from corrupted PDUs all Rx H-HARQ buffers
+    // 从损坏的PDU中清除所有Rx H-HARQ缓冲区
+    for (hit= harqRxBuffers_.begin(); hit != het; ++hit)
+    {
+        // purge corrupted PDUs only if this buffer is for a DL transmission. Otherwise, if you
+        // purge PDUs for D2D communication, also "mirror" buffers will be purged
+        if (hit->first == cellId_)
+            purged += hit->second->purgeCorruptedPdus();
+    }
+    EV << NOW << " LteMacVUeMode4::handleSelfMessage Purged " << purged << " PDUS" << endl;
+
+    if (!requestSdu)
+    {
+        // update current harq process id
+        currentHarq_ = (currentHarq_+1) % harqProcesses_;
+    }
+
+    EV << "--- END UE MAIN LOOP ---" << endl;
+
+
+}
+
+void Satmac::macPduMake()
+{
+    int64 size = 0;
+
+    // typedef std::map<std::pair<MacNodeId, Codeword>, LteMacPdu*> MacPduList;
+    macPduList_.clear();
+
+    // In a D2D communication if BSR was created above this part isn't executed
+    // Build a MAC PDU for each scheduled user on each codeword
+
+    LteMacScheduleList::const_iterator it;
+    // typedef std::map<std::pair<MacCid, Codeword>, unsigned int> LteMacScheduleList;
+    // 调度列表中有数据，说明有用户数据需要处理
+    for (it = scheduleList_->begin(); it != scheduleList_->end(); it++)
+    {
+        LteMacPdu* macPkt;
+        cPacket* pkt;
+
+        // 获取调度列表中的CID以及cw
+        MacCid destCid = it->first.first;
+        Codeword cw = it->first.second;
+
+        // get the direction (UL/D2D/D2D_MULTI) and the corresponding destination ID
+        LteControlInfo* lteInfo = &(connDesc_.at(destCid));
+        MacNodeId destId = lteInfo->getDestId();
+        Direction dir = (Direction)lteInfo->getDirection();
+
+        std::pair<MacNodeId, Codeword> pktId = std::pair<MacNodeId, Codeword>(destId, cw);
+        unsigned int sduPerCid = it->second;
+
+        // 检查pdu列表里有没有pktId的连接
+        MacPduList::iterator pit = macPduList_.find(pktId);
+
+        if (sduPerCid == 0)
+        {
+            continue;
+        }
+
+        // No packets for this user on this codeword
+        if (pit == macPduList_.end())
+        {
+            // Always goes here because of the macPduList_.clear() at the beginning
+
+            // Build the Control Element of the MAC PDU
+            UserControlInfo* uinfo = new UserControlInfo();
+            uinfo->setSourceId(getMacNodeId());
+            uinfo->setDestId(destId);
+            uinfo->setLcid(MacCidToLcid(destCid));
+            uinfo->setDirection(dir);
+            uinfo->setLcid(MacCidToLcid(SHORT_BSR));
+
+            // First translate MCS to CQI
+            SatmacSchedulingGrant* satmacGrant = check_and_cast<SatmacSchedulingGrant*>(schedulingGrant_);
+
+            if (usePreconfiguredTxParams_)
+            {
+                //UserTxParams* userTxParams = preconfiguredTxParams_;
+                uinfo->setUserTxParams(preconfiguredTxParams_->dup());
+                satmacGrant->setUserTxParams(preconfiguredTxParams_->dup());
+            }
+            else
+                uinfo->setUserTxParams(satmacGrant->getUserTxParams()->dup());
+
+            // Create a PDU
+            macPkt = new LteMacPdu("LteMacPdu");
+            macPkt->setHeaderLength(MAC_HEADER);
+            macPkt->setControlInfo(uinfo);
+            macPkt->setTimestamp(NOW);
+            macPduList_[pktId] = macPkt;
+        }
+        else
+        {
+            // Never goes here because of the macPduList_.clear() at the beginning
+            macPkt = pit->second;
+        }
+
+        while (sduPerCid > 0)
+        {
+            // Add SDU to PDU
+            // Find Mac Pkt
+            // typedef std::map<MacCid, LteMacQueue*> LteMacBuffers 类型的 mbuf_
+            // mbuf_ 用来存放SDU
+            if (mbuf_.find(destCid) == mbuf_.end())
+                throw cRuntimeError("Unable to find mac buffer for cid %d", destCid);
+            //int64_t size = mbuf_[destCid]->getQueueOccupancy();
+//            int length1;
+//            int64_t size1;
+//            if(mbuf_[destCid]->empty())
+//            {
+//                length1 = mbuf_[destCid]->getQueueLength();
+//                size1 = mbuf_[destCid]->getQueueOccupancy();
+//            }
+
+            if (mbuf_[destCid]->empty())
+                //throw cRuntimeError("Empty buffer for cid %d, while expected SDUs were %d", destCid, sduPerCid);
+                return;
+
+
+
+
+            pkt = mbuf_[destCid]->popFront();
+
+            // multicast support
+            // this trick gets the group ID from the MAC SDU and sets it in the MAC PDU
+            int32 groupId = check_and_cast<LteControlInfo*>(pkt->getControlInfo())->getMulticastGroupId();
+            if (groupId >= 0) // for unicast, group id is -1
+                check_and_cast<LteControlInfo*>(macPkt->getControlInfo())->setMulticastGroupId(groupId);
+
+            drop(pkt);
+
+            macPkt->pushSdu(pkt);
+            sduPerCid--;
+        }
+
+        // consider virtual buffers to compute BSR size
+        size += macBuffers_[destCid]->getQueueOccupancy();
+
+        if (size > 0)
+        {
+            // take into account the RLC header size
+            // 考虑RLC报头大小
+            if (connDesc_[destCid].getRlcType() == UM)
+                size += RLC_HEADER_UM;
+            else if (connDesc_[destCid].getRlcType() == AM)
+                size += RLC_HEADER_AM;
+        }
+    }
+
+    // Put MAC PDUs in H-ARQ buffers
+    MacPduList::iterator pit;
+    for (pit = macPduList_.begin(); pit != macPduList_.end(); pit++)
+    {
+        MacNodeId destId = pit->first.first;
+        Codeword cw = pit->first.second;
+        // Check if the HarqTx buffer already exists for the destId
+        // Get a reference for the destId TXBuffer
+        // 检查destId的HarqTx缓冲区是否已存在
+        // 获取destId TXBuffer的引用
+        LteHarqBufferTx* txBuf;
+        HarqTxBuffers::iterator hit = harqTxBuffers_.find(destId);
+        if ( hit != harqTxBuffers_.end() )
+        {
+            // The tx buffer already exists
+            txBuf = hit->second;
+        }
+        else
+        {
+            // The tx buffer does not exist yet for this mac node id, create one
+            LteHarqBufferTx* hb;
+            // FIXME: hb is never deleted
+            UserControlInfo* info = check_and_cast<UserControlInfo*>(pit->second->getControlInfo());
+            if (info->getDirection() == UL)
+                hb = new LteHarqBufferTx((unsigned int) ENB_TX_HARQ_PROCESSES, this, (LteMacBase*) getMacByMacNodeId(destId));
+            else // D2D or D2D_MULTI
+                hb = new LteHarqBufferTxD2D((unsigned int) ENB_TX_HARQ_PROCESSES, this, (LteMacBase*) getMacByMacNodeId(destId));
+            harqTxBuffers_[destId] = hb;
+            txBuf = hb;
+        }
+
+        // search for an empty unit within current harq process
+        // 在当前harq进程中搜索空单元
+        UnitList txList = txBuf->getEmptyUnits(currentHarq_);
+        EV << "LteMacUeRealisticD2D::macPduMake - [Used Acid=" << (unsigned int)txList.first << "] , [curr=" << (unsigned int)currentHarq_ << "]" << endl;
+
+        //Get a reference of the LteMacPdu from pit pointer (extract Pdu from the MAP)
+        //从pit指针中获取LteMacPdu的引用（从MAP中提取Pdu）
+        LteMacPdu* macPkt = pit->second;
+
+        EV << "LteMacUeRealisticD2D: pduMaker created PDU: " << macPkt->info() << endl;
+
+        if (txList.second.empty())
+        {
+            EV << "LteMacUeRealisticD2D() : no available process for this MAC pdu in TxHarqBuffer" << endl;
+            delete macPkt;
+        }
+        else
+        {
+            //Insert PDU in the Harq Tx Buffer
+            //txList.first is the acid
+            txBuf->insertPdu(txList.first,cw, macPkt);
+        }
+    }
+}
+
+void Satmac::flushHarqBuffers()
+{
+    // send the selected units to lower layers
+        // First make sure packets are sent down
+        // HARQ retrans needs to be taken into account
+        // Maintain unit list maybe and that causes retrans?
+        // But purge them once all messages sent.
+
+        SatmacSchedulingGrant* satmacGrant = dynamic_cast<SatmacSchedulingGrant*>(schedulingGrant_);
+
+        HarqTxBuffers::iterator it2;
+        for(it2 = harqTxBuffers_.begin(); it2 != harqTxBuffers_.end(); it2++)
+        {
+
+            if (it2->second->isSelected())
+            {
+                LteHarqProcessTx* selectedProcess = it2->second->getSelectedProcess();
+                for (int cw=0; cw<MAX_CODEWORDS; cw++)
+                {
+                    int pduLength = selectedProcess->getPduLength(cw) * 8;
+                    if (pduLength > 0)
+                    {
+                        // 获取授权的块
+                        int totalGrantedBlocks = satmacGrant->getTotalGrantedBlocks();
+
+                        int mcsCapacity = 0;
+
+                        // 找到合适的MCS
+                        int mcs = 1;
+
+                        LteMod mod = _QPSK;
+
+                        unsigned int i = 0;
+
+                        const unsigned int* tbsVect = itbs2tbs(mod, SINGLE_ANTENNA_PORT0, 1, mcs - i);
+                        mcsCapacity = tbsVect[totalGrantedBlocks-1];
+
+
+                        satmacGrant->setMcs(mcs);
+                        satmacGrant->setGrantedCwBytes(cw, mcsCapacity);
+
+                        if (!satmacGrant->getUserTxParams())
+                        {
+                            satmacGrant->setUserTxParams(preconfiguredTxParams_->dup());
+                        }
+
+                        SatmacSchedulingGrant* phyGrant = satmacGrant->dup();
+
+                        UserControlInfo* uinfo = new UserControlInfo();
+                        uinfo->setSourceId(getMacNodeId());
+                        uinfo->setDestId(getMacNodeId());
+                        uinfo->setFrameType(GRANTPKT);
+                        uinfo->setTxNumber(1);
+                        uinfo->setDirection(D2D_MULTI);
+                        uinfo->setUserTxParams(preconfiguredTxParams_->dup());
+                        uinfo->setSubchannelNumber(satmacGrant->getStartingSubchannel());
+                        uinfo->setSubchannelLength(satmacGrant->getNumSubchannels());
+                        //uinfo->setGrantStartTime(mode4Grant->getStartTime());
+
+                        phyGrant->setControlInfo(uinfo);
+                        phyGrant->setGlobleSti(nodeId_);
+                        // Send Grant to PHY layer for sci creation
+                        sendLowerPackets(phyGrant);
+                        // Send pdu to PHY layer for sending.
+
+                        switch (this->node_state_)
+                        {
+                            case NODE_WORK_FI:
+                            case NODE_WORK_ADJ:
+                            it2->second->sendSelectedDown();
+                                break;
+                            default: break;
+                         }
+
+
+
+                        // Log transmission to A calculation log
+                        previousTransmissions_[NOW.dbl()] = satmacGrant->getNumSubchannels();
+
+                        missedTransmissions_ = 0;
+
+                        emit(selectedMCS, mcs);
+
+                    }
+                    break;
+                }
+            }
+            else
+            {
+                // if no transmission check if we need to break the grant.
+                // 如果没有传输，请检查我们是否需要中断授权。
+                ++missedTransmissions_;
+                emit(missedTransmission, 1);
+
+                SatmacSchedulingGrant* phyGrant = satmacGrant->dup();
+
+                UserControlInfo* uinfo = new UserControlInfo();
+                uinfo->setSourceId(getMacNodeId());
+                uinfo->setDestId(getMacNodeId());
+                uinfo->setFrameType(GRANTPKT);
+                uinfo->setTxNumber(1);
+                uinfo->setDirection(D2D_MULTI);
+                uinfo->setUserTxParams(preconfiguredTxParams_->dup());
+
+                phyGrant->setControlInfo(uinfo);
+
+                if (missedTransmissions_ >= reselectAfter_)
+                {
+                    phyGrant->setPeriod(0);
+                    phyGrant->setExpiration(0);
+
+                    delete schedulingGrant_;
+                    schedulingGrant_ = NULL;
+                    missedTransmissions_ = 0;
+
+                    emit(grantBreakMissedTrans, 1);
+                }
+
+                // Send Grant to PHY layer for sci creation
+                sendLowerPackets(phyGrant);
+            }
+        }
+        if (expiredGrant_)
+        {
+            // Grant has expired, only generate new grant on receiving next message to be sent.
+            delete schedulingGrant_;
+            schedulingGrant_ = NULL;
+            expiredGrant_ = false;
+        }
 }
 
 //可能不需要
-void
-TdmaSatmac::DoDispose (void)
-{
-  m_low->Dispose ();
-  m_low = 0;
-  m_device = 0;
-  m_queue = 0;
-  TdmaMac::DoDispose ();
-}
-
-// 追踪 TracedCallback<Ptr<const Packet> >
-// 感觉暂时不需要
-void
-TdmaSatmac::NotifyTx (Ptr<const Packet> packet)
-{
-  m_macTxTrace (packet);
-}
-
-void
-TdmaSatmac::NotifyTxDrop (Ptr<const Packet> packet)
-{
-  m_macTxDropTrace (packet);
-}
-
-void
-TdmaSatmac::NotifyRx (Ptr<const Packet> packet)
-{
-  m_macRxTrace (packet);
-}
-
-void
-TdmaSatmac::NotifyPromiscRx (Ptr<const Packet> packet)
-{
-  m_macPromiscRxTrace (packet);
-}
-
-void
-TdmaSatmac::NotifyRxDrop (Ptr<const Packet> packet)
-{
-  m_macRxDropTrace (packet);
-}
-
-// 设置网络设备 也不需要
-void
-TdmaSatmac::SetDevice (Ptr<TdmaNetDevice> device)
-{
-  m_device = device;
-  m_low->SetDevice (m_device);
-}
-
-Ptr<TdmaNetDevice>
-TdmaSatmac::GetDevice (void) const
-{
-  return m_device;
-}
-
-Ptr<TdmaMacLow>
-TdmaSatmac::GetTdmaMacLow (void) const
-{
-  return m_low;
-}
-
-void
-TdmaSatmac::SetForwardUpCallback (Callback<void, Ptr<Packet>, const WifiMacHeader*> upCallback)
-{
-  NS_LOG_FUNCTION (this);
-  m_upCallback = upCallback;
-}
-
-void
-TdmaSatmac::SetLinkUpCallback (Callback<void> linkUp)
-{
-  linkUp ();
-}
-void
-TdmaSatmac::SetLinkDownCallback (Callback<void> linkDown)
-{
-}
-void
-TdmaSatmac::SetTxQueueStartCallback (Callback<bool,uint32_t> queueStart)
-{
-  NS_LOG_FUNCTION (this);
-  m_queueStart = queueStart;
-}
-
-void
-TdmaSatmac::SetTxQueueStopCallback (Callback<bool,uint32_t> queueStop)
-{
-  NS_LOG_FUNCTION (this);
-  m_queueStop = queueStop;
-}
-
-// 需要改 看C-V2X中数据包的存储方式
-uint32_t
-TdmaSatmac::GetQueueState (uint32_t index)
-{
-  if (m_queue->GetMaxSize () == m_queue->GetSize ())
-    {
-      return 0;
-    }
-  else
-    {
-      return 1;
-    }
-}
-
-uint32_t
-TdmaSatmac::GetNQueues (void)
-{
-  //TDMA currently has only one queue
-  return 1;
-}
-
-
-void
-TdmaSatmac::SetMaxQueueSize (uint32_t size)
-{
-  NS_LOG_FUNCTION (this << size);
-  m_queue->SetMaxSize (size);
-}
-void
-TdmaSatmac::SetMaxQueueDelay (Time delay)
-{
-  NS_LOG_FUNCTION (this << delay);
-  m_queue->SetMaxDelay (delay);
-}
-
-
-Mac48Address
-TdmaSatmac::GetAddress (void) const
-{
-  if (!m_wifimaclow_flag)
-    return m_low->GetAddress ();
-  else
-    return m_wifimaclow->GetAddress();
-}
-Ssid
-TdmaSatmac::GetSsid (void) const
-{
-  return m_ssid;
-}
-void
-TdmaSatmac::SetAddress (Mac48Address address)
-{
-  NS_LOG_FUNCTION (address);
-  m_low->SetAddress (address);
-  m_low->SetBssid (address);
-}
-void
-TdmaSatmac::SetSsid (Ssid ssid)
-{
-  NS_LOG_FUNCTION (ssid);
-  m_ssid = ssid;
-}
-Mac48Address
-TdmaSatmac::GetBssid (void) const
-{
-  return m_low->GetBssid ();
-}
-
-void
-TdmaSatmac::Queue (Ptr<const Packet> packet, const WifiMacHeader &hdr)
-{
-  NS_LOG_FUNCTION (this << packet << &hdr);
-  if (!m_queue->Enqueue (packet, hdr))
-    {
-      NotifyTxDrop (packet);
-    }
-
-#ifdef PRINT_SLOT_STATUS
-  printf("I'm node %d, in slot %d, I Queue a data packet\n", global_sti, slot_count_);
-#endif
-  //Cannot request for channel access in tdma. Tdma schedules every node in round robin manner
-  //RequestForChannelAccess();
-}
-
-void
-TdmaSatmac::SetSlotTime (Time slotTime)
-{
-  NS_LOG_FUNCTION (this << slotTime);
-  m_slotTime = slotTime.GetMicroSeconds ();
-}
-
-Time
-TdmaSatmac::GetSlotTime (void) const
-{
-  return MicroSeconds (m_slotTime); // 需要改
-}
-
-void
-TdmaSatmac::SetDataRate (DataRate bps)
-{
-  NS_LOG_FUNCTION (this << bps);
-  m_bps = bps;
-}
-
-DataRate
-TdmaSatmac::GetDataRate (void) const
-{
-  return m_bps;
-}
-
-// 不需要
-void
-TdmaSatmac::SetChannel (Ptr<SimpleWirelessChannel> c)
-{
-  if (c != 0)
-    {
-      m_channel = c;
-      m_low->SetChannel (m_channel);
-    }
-}
-
-// 不需要
-Ptr<SimpleWirelessChannel>
-TdmaSatmac::GetChannel (void) const
-{
-  NS_LOG_FUNCTION (this);
-  return m_channel;
-}
-
-// 需要改
-void
-TdmaSatmac::SetGuardTime (Time guardTime)
-{
-  NS_LOG_FUNCTION (this << guardTime);
-  //guardTime is based on the SimpleWirelessChannel's max range
-  if (m_channel != 0)
-    {
-      m_guardTime = Seconds (m_channel->GetMaxRange () / 300000000.0).GetMicroSeconds ();
-    }
-  else
-    {
-      m_guardTime = guardTime.GetMicroSeconds ();
-    }
-}
-
-Time
-TdmaSatmac::GetGuardTime (void) const
-{
-  return MicroSeconds (m_guardTime);
-}
-
-void
-TdmaSatmac::SetInterFrameTimeInterval (Time interFrameTime)
-{
-  NS_LOG_FUNCTION (interFrameTime);
-  m_tdmaInterFrameTime = interFrameTime.GetMicroSeconds ();
-}
-
-Time
-TdmaSatmac::GetInterFrameTimeInterval (void) const
-{
-  return MicroSeconds (m_tdmaInterFrameTime);
-}
-
-void TdmaSatmac::SetGlobalSti(int sti)
-{
-  global_sti = sti;
-}
-int TdmaSatmac::GetGlobalSti(void) const
-{
-  return global_sti;
-}
-
-void TdmaSatmac::SetFrameLen(int framelen)
-{
-  m_frame_len = framelen;
-}
-int TdmaSatmac::GetFrameLen(void) const
-{
-  return m_frame_len;
-}
-
-void TdmaSatmac::SetSlotLife(int slotlife_perframe)
-{
-  slot_lifetime_frame_ = slotlife_perframe;
-}
-
-int TdmaSatmac::GetSlotLife(void) const
-{
-  return slot_lifetime_frame_;
-}
-
-void TdmaSatmac::SetC3HThreshold(int c3h_threshold)
-{
-  c3hop_threshold_ = c3h_threshold;
-}
-
-int TdmaSatmac::GetC3HThreshold(void) const
-{
-  return c3hop_threshold_;
-}
-
-void TdmaSatmac::SetAdjThreshold(int adj_threshold)
-{
-  adj_free_threshold_ = adj_threshold;
-}
-
-int TdmaSatmac::GetAdjThreshold(void) const
-{
-  return adj_free_threshold_;
-}
-
-// 需要改 随机数
-void TdmaSatmac::SetRandomBchIfSingle(int flag)
-{
-  random_bch_if_single_switch_ = flag;
-}
-
-int TdmaSatmac::GetRandomBchIfSingle(void) const
-{
-  return random_bch_if_single_switch_;
-}
-
-int TdmaSatmac::getChooseBchRandomSwitch() const {
-    return choose_bch_random_switch_;
-}
-
-void TdmaSatmac::setChooseBchRandomSwitch(int chooseBchRandomSwitch) {
-    choose_bch_random_switch_ = chooseBchRandomSwitch;
-}
-
-void TdmaSatmac::SetAdjEnable(int flag)
-{
-  adj_ena_ = flag;
-}
-
-int TdmaSatmac::GetAdjEnable(void) const
-{
-  return adj_ena_;
-}
-
-void TdmaSatmac::SetAdjFrameEnable(int flag)
-{
-  adj_frame_ena_ = flag;
-}
-
-int TdmaSatmac::GetAdjFrameEnable(void) const
-{
-  return adj_frame_ena_;
-}
-
-void TdmaSatmac::SetAdjFrameLowerBound(int lowerbound)
-{
-  adj_frame_lower_bound_ = lowerbound;
-}
-
-int TdmaSatmac::GetAdjFrameLowerBound(void) const
-{
-  return adj_frame_lower_bound_;
-}
-
-void TdmaSatmac::SetAdjFrameUpperBound(int upperbound)
-{
-  adj_frame_upper_bound_ = upperbound;
-}
-
-int TdmaSatmac::GetAdjFrameUpperBound(void) const
-{
-  return adj_frame_upper_bound_;
-}
-
-void TdmaSatmac::SetSlotMemory(int flag)
-{
-  slot_memory_ = flag;
-}
-
-int TdmaSatmac::GetSlotMemory(void) const
-{
-  return slot_memory_;
-}
-
-// 需要改
-void TransmissionListenerUseless::EndTxNoAck()
-{
-      txok = true;
-}
-
-// 需要改
-void
-TdmaSatmac::Enqueue (Ptr<const Packet> packet, Mac48Address to, Mac48Address from)
-{
-  NS_LOG_FUNCTION (this << packet << to << from);
-  WifiMacHeader hdr;
-  hdr.SetType (WIFI_MAC_DATA);
-  hdr.SetAddr1 (to);
-  hdr.SetAddr2 (GetAddress ());
-  hdr.SetAddr3 (from);
-  hdr.SetDsFrom ();
-  hdr.SetDsNotTo ();
-  Queue (packet, hdr);
-}
-
-// 需要改
-void
-TdmaSatmac::Enqueue (Ptr<const Packet> packet, Mac48Address to)
-{
-  NS_LOG_FUNCTION (this << packet << to);
-  WifiMacHeader hdr;
-  hdr.SetType (WIFI_MAC_DATA);
-  hdr.SetAddr1 (to);
-  hdr.SetAddr2 (GetAddress ());
-  hdr.SetAddr3 (m_low->GetAddress ());
-  hdr.SetDsFrom ();
-  hdr.SetDsNotTo ();
-  Queue (packet, hdr);
-  NS_LOG_FUNCTION (this << packet << to);
-}
-
-// 需要改
-void TdmaSatmac::Enqueue (Ptr<const Packet> packet, WifiMacHeader hdr)
-{
-    Queue (packet, hdr);
-}
-
-bool
-TdmaSatmac::SupportsSendFrom (void) const
-{
-  return true;
-}
-
-void
-TdmaSatmac::TxOk (const WifiMacHeader &hdr)
-{
-}
-void
-TdmaSatmac::TxFailed (const WifiMacHeader &hdr)
-{
-}
-
-void
-TdmaSatmac::TxQueueStart (uint32_t index)
-{
-  NS_ASSERT (index < GetNQueues ());
-  m_queueStart (index);
-}
-
-void
-TdmaSatmac::TxQueueStop (uint32_t index)
-{
-  NS_ASSERT (index < GetNQueues ());
-  m_queueStop (index);
-}
-
-void TdmaSatmac::show_slot_occupation() {
-    int i,free_count = 0;
+void Satmac::show_slot_occupation() {
+    int i,j,free_count = 0;
     std::map<unsigned int,int> omap;
-    slot_tag *fi_local_= this->collected_fi_->slot_describe;
+    slot_tag **fi_local_= this->collected_fi_->slot_describe;
     for(i=0 ; i < m_frame_len; i++){
-        if(fi_local_[i].busy== SLOT_FREE)
-            free_count++;
-        else {
-            if (omap[fi_local_[i].sti]) //sti = ID
-                NS_LOG_DEBUG("Node " << fi_local_[i].sti <<" has occupied more than one slot!");  // 需要改
-            else
-                omap[fi_local_[i].sti] = 1;
+        for(j = 0; j < m_channel_num; j++){
+            if(fi_local_[i][j].busy== SLOT_FREE)
+                free_count++;
+            else {
+                if (omap[fi_local_[i][j].sti]) //sti = ID
+                    EV << "Node " << fi_local_[i][j].sti <<" has occupied more than one slot!";  // 需要改
+                else
+                    omap[fi_local_[i][j].sti] = 1;
+            }
         }
     }
-    NS_LOG_DEBUG("FREE SLOT: " << free_count); // 需要改
+    //NS_LOG_DEBUG("FREE SLOT: " << free_count); // 需要改
 }
 
-void TdmaSatmac::clear_others_slot_status() {
-    slot_tag *fi_local = this->collected_fi_->slot_describe;
-    int count;
+void Satmac::clear_others_slot_status() {
+    slot_tag **fi_local = this->collected_fi_->slot_describe;
+    int count,j;
     for (count=0; count < m_frame_len; count++){
-        if (fi_local[count].sti != global_sti) {
-            fi_local[count].busy = SLOT_FREE;
-            fi_local[count].sti = 0;
-            fi_local[count].count_2hop = 0;
-            fi_local[count].count_3hop = 0;
-            fi_local[count].psf = 0;
-            fi_local[count].locker = 0;
+        for(j = 0; j < m_channel_num; j++)
+        {
+            if (fi_local[count][j].sti != nodeId_) {
+                fi_local[count][j].busy = SLOT_FREE;
+                fi_local[count][j].sti = 0;
+                fi_local[count][j].count_2hop = 0;
+                fi_local[count][j].count_3hop = 0;
+                fi_local[count][j].psf = 0;
+                fi_local[count][j].locker = 0;
+            }
         }
+
     }
 }
 
 //初始化一个fi记录
-void TdmaSatmac::clear_FI(Frame_info *fi){
+void Satmac::clear_FI(Frame_info *fi){
     //fi->frame_len;
     //fi->index;
     //fi->sti;
@@ -822,16 +767,24 @@ void TdmaSatmac::clear_FI(Frame_info *fi){
     fi->remain_time = 0;
     fi->recv_slot = -1;
     if(fi->slot_describe != NULL){
+        for(int i = 0; i < m_frame_len; i++)
+        {
+            delete[] fi->slot_describe[i];
+        }
         delete[] fi->slot_describe;
     }
-    fi->slot_describe = new slot_tag[512];
+    fi->slot_describe = new slot_tag*[512];
+    for(int i = 0; i < 512; i++)
+    {
+        fi->slot_describe[i] = new slot_tag[m_channel_num];
+    }
 }
 
 /*
  * allocate a new fi and add insert in the head of received_fi_list;
  */
-Frame_info * TdmaSatmac::get_new_FI(int slot_count){
-    Frame_info *newFI= new Frame_info(slot_count);
+Frame_info * Satmac::get_new_FI(int slot_count){
+    Frame_info *newFI= new Frame_info(slot_count, 1);
 //  newFI->next_fi = this->received_fi_list_;
     Frame_info *tmp;
 
@@ -846,55 +799,62 @@ Frame_info * TdmaSatmac::get_new_FI(int slot_count){
     return newFI;
 }
 
-void TdmaSatmac::print_slot_status(void) {
-    slot_tag *fi_local = this->collected_fi_->slot_describe;
-    int i, count;
+void Satmac::print_slot_status(void) {
+    slot_tag **fi_local = this->collected_fi_->slot_describe;
+    int i, j,count;
     int free_count_ths = 0, free_count_ehs = 0;
     for(i=0 ; i < m_frame_len; i++){
-        if (fi_local[i].busy== SLOT_FREE)
-            free_count_ths++;
-        if(fi_local[i].busy== SLOT_FREE && fi_local[i].count_3hop == 0)
-            free_count_ehs++;
+        for(j = 0; j < m_channel_num; j++)
+        {
+            if (fi_local[i][j].busy== SLOT_FREE)
+                free_count_ths++;
+            if(fi_local[i][j].busy== SLOT_FREE && fi_local[i][j].count_3hop == 0)
+                free_count_ehs++;
+        }
     }
-    //NS_LOG_DEBUG("I'm node "<<global_sti<<" in slot " <<slot_count_<<" FreeThs: "<<free_count_ths<<", Ehs "
+    //NS_LOG_DEBUG("I'm node "<<nodeId_<<" in slot " <<slot_count_<<" FreeThs: "<<free_count_ths<<", Ehs "
             //<<free_count_ehs<<" total "<< m_frame_len<<" status: ");
     for (count=0; count < m_frame_len; count++){
         //NS_LOG_DEBUG("|| "<< fi_local[count].sti<<" ");
-        switch (fi_local[count].busy) {
-        case SLOT_FREE:
-            NS_LOG_DEBUG("(0,0) ");
-            break;
-        case SLOT_1HOP:
-            NS_LOG_DEBUG("(1,0) ");
-            break;
-        case SLOT_2HOP:
-            NS_LOG_DEBUG("(0,1) ");
-            break;
-        case SLOT_COLLISION:
-            NS_LOG_DEBUG("(1,1) ");
-            break;
+        for(j = 0; j < m_channel_num; j++)
+        {
+            switch (fi_local[count][j].busy) {
+            case SLOT_FREE:
+                //NS_LOG_DEBUG("(0,0) ");
+                break;
+            case SLOT_1HOP:
+                //NS_LOG_DEBUG("(1,0) ");
+                break;
+            case SLOT_2HOP:
+                //NS_LOG_DEBUG("(0,1) ");
+                break;
+            case SLOT_COLLISION:
+                //NS_LOG_DEBUG("(1,1) ");
+                break;
+            }
         }
-
-        //NS_LOG_DEBUG("c:"<< fi_local[count].count_2hop<<"/"<<fi_local[count].count_3hop<<" ");
+     //NS_LOG_DEBUG("c:"<< fi_local[count].count_2hop<<"/"<<fi_local[count].count_3hop<<" ");
     }
     //NS_LOG_DEBUG("");
 }
 
-bool TdmaSatmac::isNewNeighbor(int sid) {
-    slot_tag *fi_local = this->collected_fi_->slot_describe;
-    int count;
+bool Satmac::isNewNeighbor(int sid) {
+    slot_tag **fi_local = this->collected_fi_->slot_describe;
+    int count,j;
     for (count=0; count < m_frame_len; count++){
-        if (fi_local[count].sti == sid)
-            return false;
+        for(j = 0; j < m_channel_num; j++){
+            if (fi_local[count][j].sti == sid)
+                return false;
+        }
     }
     return true;
 }
 
 /* This function is used to pick up a random slot of from those which is free. */
-int TdmaSatmac::determine_BCH(bool strict){
-    int i=0,chosen_slot=0;
+int Satmac::determine_BCH(bool strict){
+    int i=0,j,chosen_slot=0;
 //  int loc;
-    slot_tag *fi_local_= this->collected_fi_->slot_describe;
+    slot_tag **fi_local_= this->collected_fi_->slot_describe;
 //  int s1c[256];
     int s2c[256];
     int s0c[256];
@@ -909,60 +869,40 @@ int TdmaSatmac::determine_BCH(bool strict){
     int free_count_ths = 0, free_count_ehs = 0;
 
     for(i=0 ; i < m_frame_len; i++){
-        if((fi_local_[i].busy== SLOT_FREE || (!strict && fi_local_[i].sti==global_sti)) && !fi_local_[i].locker) {
-            if (vemac_mode_) {
-                if (i < m_frame_len/2)
-                    s0_1c[s0_1c_num++] = i;
-                else
-                    s0_2c[s0_2c_num++] = i;
-            } else if (adj_ena_) {
-                s2c[s2c_num++] = i;
-//              if (i < m_frame_len/2)
-//                  s2_1c[s2_1c_num++] = i;
+        for(j = 0; j < m_channel_num;j++)
+        {
+            if((fi_local_[i][j].busy== SLOT_FREE || (!strict && fi_local_[i][j].sti==nodeId_)) && !fi_local_[i][j].locker) {
+                if (adj_ena_) {
+                    s2c[s2c_num++] = i;
+                    // if (i < m_frame_len/2)
+                    // s2_1c[s2_1c_num++] = i;
 
-                if (fi_local_[i].count_3hop  == 0) {
+                    if (fi_local_[i][j].count_3hop  == 0) {
+                        s0c[s0c_num++] = i;
+                        // s1c[s1c_num++] = i;
+                        if (i < m_frame_len/2)
+                            s0_1c[s0_1c_num++] = i;
+                    } else if (fi_local_[i][j].count_3hop < c3hop_threshold_ ){
+                        // s1c[s1c_num++] = i;
+                    }
+
+                } else {
                     s0c[s0c_num++] = i;
-//                  s1c[s1c_num++] = i;
-                    if (i < m_frame_len/2)
-                        s0_1c[s0_1c_num++] = i;
-                } else if (fi_local_[i].count_3hop < c3hop_threshold_ ){
-//                  s1c[s1c_num++] = i;
                 }
-
-            } else {
-                s0c[s0c_num++] = i;
             }
         }
-    }
-    if (vemac_mode_) {
 
-        if (direction_ > 0) {
-            if (s0_1c_num > 0) {
-                chosen_slot = intuniform(0, s0_1c_num-1);
-                return s0_1c[chosen_slot];
-            } else if (s0_2c_num > 0) {
-                chosen_slot = intuniform(0, s0_2c_num-1);
-                return s0_2c[chosen_slot];
-            } else
-                return -1;
-        } else {
-            if (s0_2c_num > 0) {
-                chosen_slot = intuniform(0, s0_2c_num-1);
-                return s0_2c[chosen_slot];
-            } else if (s0_1c_num > 0) {
-                chosen_slot = intuniform(0, s0_1c_num-1);
-                return s0_1c[chosen_slot];
-            } else
-                return -1;
-        }
     }
-
 
     for(i=0 ; adj_frame_ena_ && i < m_frame_len; i++){
-        if (fi_local_[i].busy== SLOT_FREE)
-            free_count_ths++;
-        if(fi_local_[i].busy== SLOT_FREE && fi_local_[i].count_3hop == 0)
-            free_count_ehs++;
+        for(j = 0; j < m_channel_num; j++)
+        {
+            if (fi_local_[i][j].busy== SLOT_FREE)
+                free_count_ths++;
+            if(fi_local_[i][j].busy== SLOT_FREE && fi_local_[i][j].count_3hop == 0)
+                free_count_ehs++;
+        }
+
     }
 
     //Choose slot only in the fist half of frame (when adjusting slot)
@@ -978,12 +918,12 @@ int TdmaSatmac::determine_BCH(bool strict){
 
     if (testmode_init_flag_ && choose_bch_random_switch_ == 2) {
         testmode_init_flag_ = 0;
-        switch (global_sti) {
+        switch (nodeId_) {
         case 1: return 0;
         case 2: return 1;
         case 3: return 2;
         case 4: return 0;
-        default: return global_sti -1;
+        default: return nodeId_ -1;
         }
     }
 
@@ -1022,374 +962,289 @@ int TdmaSatmac::determine_BCH(bool strict){
 
 }
 
-void
-TdmaSatmac::Receive (cMessage *msg)
-{
-//  if (hdr->IsSatmacData())
-//    {
-//      if (m_start_delay_frames > 0)
-//          return;
-//
-//      recvFI(packet);
-//      recv_fi_count_++;
-//    } else
-//      ForwardUp (packet, hdr);
-    recvFI(msg);
-    recv_fi_count_++;
-
-}
-
-//void
-//TdmaSatmac::ForwardUp (Ptr<Packet> packet, const WifiMacHeader *hdr)
-//{
-//  //NotifyRx(packet);
-//
-//    m_upCallback (packet, hdr);
-//}
-
-
-/**
- * 把收到的FI包解序列化后存到received_fi_list_中。
- */
-void TdmaSatmac::recvFI(cMessage *msg){
-    //unsigned int bit_pos=7, byte_pos=0;
-    unsigned long value=0;
-    unsigned int recv_fi_frame_fi = 0;
-    unsigned int i=0;
-    unsigned int tmp_sti;
-    SatmacPacket *satmac_msg = check_and_cast<SatmacPacket *>(msg);
-
-    //unsigned int bit_remain,index;
-    Frame_info *fi_recv;
-
-    //satmac::FiHeader fihdr;
-    //unsigned char buffer = p->accessdata();
-    //p->RemoveHeader(fihdr);
-
-    //value = fihdr.decode_value(byte_pos,bit_pos,BIT_LENGTH_STI);
-    //tmp_sti = (unsigned int)value;
-    tmp_sti = satmac_msg->getGlobleSti();
-    //value = fihdr.decode_value(byte_pos,bit_pos,BIT_LENGTH_FRAMELEN);
-    if (adj_frame_ena_)
-        recv_fi_frame_fi = pow(2, value);
-    else
-        recv_fi_frame_fi = m_frame_len;
-
-    fi_recv = this->get_new_FI(recv_fi_frame_fi);
-    fi_recv->sti = tmp_sti;
-    fi_recv->frame_len = recv_fi_frame_fi;
-    fi_recv->recv_slot = this->slot_count_;
-    //fi_recv->type = TYPE_FI;
-
-    fi_recv->valid_time = this->m_frame_len;
-    fi_recv->remain_time = fi_recv->valid_time;
-
-//
-//  for (int j = 0; j < tlen; j++)
-//      printf("%x ", buffer[j]);
-//  printf("\n");
-
-//    for(i=0; i<(unsigned int)recv_fi_frame_fi; i++){
-//        fihdr.decode_slot_tag(byte_pos, bit_pos, i, fi_recv);
-//    }
-
-//  NS_LOG_DEBUG("slot "<<slot_count_<<" node "<<global_sti<<" recv a FI from node "<<fi_recv->sti<<": ");
-//  for(i=0; i<(unsigned int)recv_fi_frame_fi; i++){
-//      slot_tag* fi=fi_recv->slot_describe;
-//      NS_LOG_DEBUG("|"<<fi[i].sti<<" b:"<<fi[i].busy<<" c:"<<fi[i].count_2hop);
-//  }
-#ifdef PRINT_SLOT_STATUS
-//    std::ofstream out (m_traceOutFile, std::ios::app);
-//    //*m_log_lpf_stream->GetStream()
-//  out << "Time:"<<Simulator::Now().GetMicroSeconds()<<"  slot "<<slot_count_<<", node "<<global_sti<<
-//          "recv a FI from node "<<fi_recv->sti<<": " ;
-//  for(i=0; i<(unsigned int)recv_fi_frame_fi; i++){
-//      slot_tag* fi=fi_recv->slot_describe;
-//      out << "|"<<fi[i].sti<<" b:"<<fi[i].busy<<" c:"<<fi[i].count_2hop<<" ";
-//  }
-//  out<<std::endl;
-//  out.close ();
-    printf("Time: %ld  ", Simulator::Now().GetMicroSeconds());
-    printf("slot %d, node %d recv a FI from node %d, loc: %.1f,%.1f", slot_count_, global_sti, fi_recv->sti,
-            (this->getNodePtr())->GetObject<MobilityModel> ()->GetPosition ().x,(this->getNodePtr())->GetObject<MobilityModel> ()->GetPosition ().y);
-    for(i=0; i<(unsigned int)recv_fi_frame_fi; i++){
-        slot_tag* fi=fi_recv->slot_describe;
-        printf("|%d b:%d c:%d ", fi[i].sti, fi[i].busy, fi[i].count_2hop);
-    }
-    printf("\n");
-
-
-#endif
-    return;
-}
-
-void TdmaSatmac::merge_fi(Frame_info* base, Frame_info* append, Frame_info* decision){
-    int count=0;
-    slot_tag *fi_local_ = base->slot_describe;
-    slot_tag *fi_append = append->slot_describe;
+void Satmac::merge_fi(Frame_info* base, Frame_info* append, Frame_info* decision){
+    int count=0,j;
+    slot_tag **fi_local_ = base->slot_describe;
+    slot_tag **fi_append = append->slot_describe;
     slot_tag recv_tag;
     int recv_fi_frame_len = append->frame_len;
 
-//  printf("I'm n%d, start merge fi from n %d\n", global_sti,append->sti);
+//  printf("I'm n%d, start merge fi from n %d\n", nodeId_,append->sti);
     // status of our BCH should be updated first.
     for (count=0; count < m_frame_len; count++){
-        recv_tag = fi_append[count];
         if (count == recv_fi_frame_len)
             break;
+        for(j = 0; j < m_channel_num; j++)
+        {
 
-        if (fi_local_[count].sti == global_sti ) {//我自己的时隙
-//          if (count != slot_num_ && count != slot_adj_candidate_) {
-////                printf("I'm node %d, I recv a strange pkt..\n",global_sti);
-//              continue;
-//          }
-            if (fi_local_[count].sti != recv_tag.sti && recv_tag.sti != 0) {//FI记录的id和我不一致
-                switch (recv_tag.busy)
-                {
-                    case SLOT_1HOP:
-                        if (recv_tag.psf > fi_local_[count].psf) {
-                            fi_local_[count].life_time = slot_lifetime_frame_;
-                            fi_local_[count].sti = recv_tag.sti;
-                            fi_local_[count].count_2hop ++;
-                            fi_local_[count].count_3hop += recv_tag.count_2hop;
-                            if (recv_tag.sti == append->sti) { //FI发送者是该时隙的占有者
-                                fi_local_[count].busy = SLOT_1HOP;
-                            } else {
-                                fi_local_[count].busy = SLOT_2HOP;
+            recv_tag = fi_append[count][j];
+
+            if (fi_local_[count][j].sti == nodeId_ ) {//我自己的时隙
+                // if (count != slot_num_ && count != slot_adj_candidate_) {
+                // printf("I'm node %d, I recv a strange pkt..\n",nodeId_);
+                // continue;
+                //   }
+                if (fi_local_[count][j].sti != recv_tag.sti && recv_tag.sti != 0) {//FI记录的id和我不一致
+                    switch (recv_tag.busy)
+                    {
+                        case SLOT_1HOP:
+                            if (recv_tag.psf > fi_local_[count][j].psf) {
+                                fi_local_[count][j].life_time = slot_lifetime_frame_;
+                                fi_local_[count][j].sti = recv_tag.sti;
+                                fi_local_[count][j].count_2hop ++;
+                                fi_local_[count][j].count_3hop += recv_tag.count_2hop;
+                                if (recv_tag.sti == append->sti) { //FI发送者是该时隙的占有者
+                                    fi_local_[count][j].busy = SLOT_1HOP;
+                                } else {
+                                    fi_local_[count][j].busy = SLOT_2HOP;
+                                }
+                            } else if (recv_tag.psf == fi_local_[count][j].psf) {
+                                fi_local_[count][j].busy = SLOT_COLLISION;
                             }
-                        } else if (recv_tag.psf == fi_local_[count].psf) {
-                            fi_local_[count].busy = SLOT_COLLISION;
-                        }
-                        break;
-                    case SLOT_2HOP:
-                        fi_local_[count].count_3hop += recv_tag.count_2hop;
-                        break;
-                    case SLOT_FREE:
-                        //出现了隐藏站
-                        fi_local_[count].busy = SLOT_COLLISION;
-                        break;
-                    case SLOT_COLLISION:
-                        fi_local_[count].life_time = slot_lifetime_frame_;
-                        fi_local_[count].sti = recv_tag.sti;
-                        fi_local_[count].count_2hop = 1;
-                        fi_local_[count].count_3hop = 1;
-                        fi_local_[count].busy = SLOT_2HOP;
-                        break;
-                }
-            } else if (fi_local_[count].sti == recv_tag.sti){ //FI记录的id和我一致
-                switch (recv_tag.busy)
-                {
-                    case SLOT_1HOP:
-//                      if (recv_tag.count_2hop > 1)
-//                          fi_local_[count].count_3hop += recv_tag.count_2hop;
-                        break;
-                    case SLOT_2HOP:
-//                      //出现了隐藏站
-//                      fi_local_[count].busy = SLOT_COLLISION;
-                        break;
-                    case SLOT_FREE:
-                        //出现了隐藏站
-                        fi_local_[count].busy = SLOT_COLLISION;
-                        break;
-                    case SLOT_COLLISION:
-                        break;
-                }
-            } else { //STI-slot == 0
-                if (recv_tag.busy == SLOT_FREE && count != slot_adj_candidate_) {
-                    if (!isNewNeighbor(append->sti)) {
-                        //出现了隐藏站
-                        fi_local_[count].busy = SLOT_COLLISION;
+                            break;
+                        case SLOT_2HOP:
+                            fi_local_[count][j].count_3hop += recv_tag.count_2hop;
+                            break;
+                        case SLOT_FREE:
+                            //出现了隐藏站
+                            fi_local_[count][j].busy = SLOT_COLLISION;
+                            break;
+                        case SLOT_COLLISION:
+                            fi_local_[count][j].life_time = slot_lifetime_frame_;
+                            fi_local_[count][j].sti = recv_tag.sti;
+                            fi_local_[count][j].count_2hop = 1;
+                            fi_local_[count][j].count_3hop = 1;
+                            fi_local_[count][j].busy = SLOT_2HOP;
+                            break;
                     }
-                } else {
-                    //error state.
+                } else if (fi_local_[count][j].sti == recv_tag.sti){ //FI记录的id和我一致
+                    switch (recv_tag.busy)
+                    {
+                        case SLOT_1HOP:
+    //                      if (recv_tag.count_2hop > 1)
+    //                          fi_local_[count].count_3hop += recv_tag.count_2hop;
+                            break;
+                        case SLOT_2HOP:
+    //                      //出现了隐藏站
+    //                      fi_local_[count].busy = SLOT_COLLISION;
+                            break;
+                        case SLOT_FREE:
+                            //出现了隐藏站
+                            fi_local_[count][j].busy = SLOT_COLLISION;
+                            break;
+                        case SLOT_COLLISION:
+                            break;
+                    }
+                } else { //STI-slot == 0
+                    if (recv_tag.busy == SLOT_FREE && count != slot_adj_candidate_) {
+                        if (!isNewNeighbor(append->sti)) {
+                            //出现了隐藏站
+                            fi_local_[count][j].busy = SLOT_COLLISION;
+                        }
+                    } else {
+                        //error state.
+                    }
                 }
             }
         }
+
+
+
     }
 
     //遍历每一个时隙
     for (count=0; count < ((recv_fi_frame_len > m_frame_len)?recv_fi_frame_len:m_frame_len); count++){
         if (count == recv_fi_frame_len)
             break;
+        for(j = 0;j < m_channel_num; j++)
+        {
 
-        if (count >= m_frame_len ) {
-            if (fi_local_[count].sti != 0)
-                printf("merge_fi: node %d Protocol ERROR!!\n", global_sti);
-        }
 
-        if (fi_local_[count].locker == 1)
-            continue;
+            if (count >= m_frame_len ) {
+                if (fi_local_[count][j].sti != 0)
+                    printf("merge_fi: node %d Protocol ERROR!!\n", nodeId_);
+            }
 
-        //merge the recv_tag to fi_local_[slot_pos]
-        recv_tag = fi_append[count];
-        if (fi_local_[count].sti == global_sti || recv_tag.sti == global_sti)
-            continue;
-        else if (fi_local_[count].busy == SLOT_1HOP && fi_local_[count].sti != global_sti) {//直接邻居占用
-            if (fi_local_[count].sti != recv_tag.sti && recv_tag.sti != 0) {
-                switch (recv_tag.busy)
-                {
-                    case SLOT_1HOP:
-                        if (recv_tag.sti == append->sti) { //FI发送者是该时隙的占有者
-                            if (recv_tag.psf > fi_local_[count].psf) {
-                                fi_local_[count].life_time = slot_lifetime_frame_;
-                                fi_local_[count].sti = recv_tag.sti;
-                                fi_local_[count].count_2hop ++;
-                                fi_local_[count].count_3hop += recv_tag.count_2hop;
-                                fi_local_[count].busy = SLOT_1HOP;
-                            } else if (recv_tag.psf == fi_local_[count].psf) {
-                                fi_local_[count].life_time = slot_lifetime_frame_;
-                                fi_local_[count].busy = SLOT_COLLISION;
+            if (fi_local_[count][j].locker == 1)
+                continue;
+
+            //merge the recv_tag to fi_local_[slot_pos]
+            recv_tag = fi_append[count][j];
+            if (fi_local_[count][j].sti == nodeId_ || recv_tag.sti == nodeId_)
+                continue;
+            else if (fi_local_[count][j].busy == SLOT_1HOP && fi_local_[count][j].sti != nodeId_) {//直接邻居占用
+                if (fi_local_[count][j].sti != recv_tag.sti && recv_tag.sti != 0) {
+                    switch (recv_tag.busy)
+                    {
+                        case SLOT_1HOP:
+                            if (recv_tag.sti == append->sti) { //FI发送者是该时隙的占有者
+                                if (recv_tag.psf > fi_local_[count][j].psf) {
+                                    fi_local_[count][j].life_time = slot_lifetime_frame_;
+                                    fi_local_[count][j].sti = recv_tag.sti;
+                                    fi_local_[count][j].count_2hop ++;
+                                    fi_local_[count][j].count_3hop += recv_tag.count_2hop;
+                                    fi_local_[count][j].busy = SLOT_1HOP;
+                                } else if (recv_tag.psf == fi_local_[count][j].psf) {
+                                    fi_local_[count][j].life_time = slot_lifetime_frame_;
+                                    fi_local_[count][j].busy = SLOT_COLLISION;
+                                }
+                            } else {
+                                fi_local_[count][j].count_2hop ++;
+                                fi_local_[count][j].count_3hop += recv_tag.count_2hop;
                             }
-                        } else {
-                            fi_local_[count].count_2hop ++;
-                            fi_local_[count].count_3hop += recv_tag.count_2hop;
-                        }
-                        break;
-                    case SLOT_2HOP:
-                        fi_local_[count].count_3hop += recv_tag.count_2hop;
-                        break;
-                    case SLOT_FREE:
-                        break;
-                    case SLOT_COLLISION:
-                        fi_local_[count].life_time = slot_lifetime_frame_;
-                        fi_local_[count].sti = recv_tag.sti;
-                        fi_local_[count].count_2hop = 1;
-                        fi_local_[count].count_3hop = 1;
-                        fi_local_[count].busy = SLOT_2HOP;
-                        break;
-                }
-            } else if (fi_local_[count].sti == recv_tag.sti){ //FI记录的id和我一致
-                switch (recv_tag.busy)
-                {
-                    case SLOT_1HOP:
-                        if (recv_tag.sti == append->sti) { //FI发送者是该时隙的占有者
-                                fi_local_[count].life_time = slot_lifetime_frame_;
-                            if (fi_local_[count].c3hop_flag == 0) {
-                                fi_local_[count].count_2hop ++;
-                                fi_local_[count].count_3hop += recv_tag.count_2hop;
-                                fi_local_[count].c3hop_flag = 1;
+                            break;
+                        case SLOT_2HOP:
+                            fi_local_[count][j].count_3hop += recv_tag.count_2hop;
+                            break;
+                        case SLOT_FREE:
+                            break;
+                        case SLOT_COLLISION:
+                            fi_local_[count][j].life_time = slot_lifetime_frame_;
+                            fi_local_[count][j].sti = recv_tag.sti;
+                            fi_local_[count][j].count_2hop = 1;
+                            fi_local_[count][j].count_3hop = 1;
+                            fi_local_[count][j].busy = SLOT_2HOP;
+                            break;
+                    }
+                } else if (fi_local_[count][j].sti == recv_tag.sti){ //FI记录的id和我一致
+                    switch (recv_tag.busy)
+                    {
+                        case SLOT_1HOP:
+                            if (recv_tag.sti == append->sti) { //FI发送者是该时隙的占有者
+                                    fi_local_[count][j].life_time = slot_lifetime_frame_;
+                                if (fi_local_[count][j].c3hop_flag == 0) {
+                                    fi_local_[count][j].count_2hop ++;
+                                    fi_local_[count][j].count_3hop += recv_tag.count_2hop;
+                                    fi_local_[count][j].c3hop_flag = 1;
+                                }
+                            } else {
+                                fi_local_[count][j].existed = 1;
+                                // do nothing.
                             }
-                        } else {
-                            fi_local_[count].existed = 1;
-                            // do nothing.
-                        }
 
-                        break;
-                    case SLOT_2HOP:
-                    case SLOT_FREE:
-                    case SLOT_COLLISION:
-                        break;
+                            break;
+                        case SLOT_2HOP:
+                        case SLOT_FREE:
+                        case SLOT_COLLISION:
+                            break;
+                    }
+                } else { //STI-slot == 0
+                    if (append->sti == fi_local_[count][j].sti) {
+                        fi_local_[count][j].life_time = 0;
+                        fi_local_[count][j].sti = 0;
+                        fi_local_[count][j].count_2hop = 0;
+                        fi_local_[count][j].count_3hop = 0;
+                        fi_local_[count][j].busy = SLOT_FREE;
+                        fi_local_[count][j].locker = 1;
+                    }
                 }
-            } else { //STI-slot == 0
-                if (append->sti == fi_local_[count].sti) {
-                    fi_local_[count].life_time = 0;
-                    fi_local_[count].sti = 0;
-                    fi_local_[count].count_2hop = 0;
-                    fi_local_[count].count_3hop = 0;
-                    fi_local_[count].busy = SLOT_FREE;
-                    fi_local_[count].locker = 1;
+            }else if (fi_local_[count][j].busy == SLOT_2HOP) {//两跳邻居占用
+                if (fi_local_[count][j].sti != recv_tag.sti && recv_tag.sti != 0) {
+                    switch (recv_tag.busy)
+                    {
+                        case SLOT_1HOP:
+                            fi_local_[count][j].count_2hop ++;
+                            fi_local_[count][j].count_3hop += recv_tag.count_2hop;
+                            break;
+                        case SLOT_2HOP:
+                        case SLOT_FREE:
+                            break;
+                        case SLOT_COLLISION:
+                            fi_local_[count][j].life_time = slot_lifetime_frame_;
+                            fi_local_[count][j].sti = recv_tag.sti;
+                            fi_local_[count][j].count_2hop = 1;
+                            fi_local_[count][j].count_3hop = 1;
+                            fi_local_[count][j].busy = SLOT_2HOP;
+                            break;
+                    }
+                } else if (fi_local_[count][j].sti == recv_tag.sti){ //FI记录的id和我一致
+                    switch (recv_tag.busy)
+                    {
+                        case SLOT_1HOP:
+                            if (recv_tag.sti == append->sti) { //FI发送者是该时隙的占有者
+                                fi_local_[count][j].busy = SLOT_1HOP;
+                                fi_local_[count][j].life_time = slot_lifetime_frame_;
+                                if (fi_local_[count][j].c3hop_flag == 0) {
+                                    fi_local_[count][j].c3hop_flag = 1;
+                                    fi_local_[count][j].count_2hop ++;
+                                    fi_local_[count][j].count_3hop += recv_tag.count_2hop;
+                                }
+                            } else {
+                                fi_local_[count][j].life_time = slot_lifetime_frame_;
+                                if (fi_local_[count][j].c3hop_flag == 0) {
+                                    fi_local_[count][j].c3hop_flag = 1;
+                                    fi_local_[count][j].count_2hop ++;
+                                    fi_local_[count][j].count_3hop += recv_tag.count_2hop;
+                                }
+                            }
+                            break;
+                        case SLOT_2HOP:
+                        case SLOT_FREE:
+                        case SLOT_COLLISION:
+                            break;
+                    }
+                } else { //STI-slot == 0
+                    if (append->sti == fi_local_[count][j].sti) {
+                        fi_local_[count][j].life_time = 0;
+                        fi_local_[count][j].sti = 0;
+                        fi_local_[count][j].count_2hop = 0;
+                        fi_local_[count][j].count_3hop = 0;
+                        fi_local_[count][j].busy = SLOT_FREE;
+                        fi_local_[count][j].locker = 1;
+                    }
+                }
+            } else if (fi_local_[count][j].busy == SLOT_FREE && fi_local_[count][j].sti == 0){ //空闲时隙
+                if (fi_local_[count][j].sti != recv_tag.sti) {
+                    switch (recv_tag.busy)
+                    {
+                        case SLOT_1HOP:
+                            fi_local_[count][j].life_time = slot_lifetime_frame_;
+                            fi_local_[count][j].sti = recv_tag.sti;
+                            fi_local_[count][j].count_2hop = 1;
+                            fi_local_[count][j].count_3hop = recv_tag.count_2hop;
+                            fi_local_[count][j].c3hop_flag = 1;
+                            if (recv_tag.sti == append->sti) { //FI发送者是该时隙的占有者
+                                fi_local_[count][j].busy = SLOT_1HOP;
+                            } else {
+                                fi_local_[count][j].busy = SLOT_2HOP;
+                            }
+                            break;
+                        case SLOT_2HOP:
+                            fi_local_[count][j].count_3hop += recv_tag.count_2hop;
+                            break;
+                        case SLOT_FREE:
+                            break;
+                        case SLOT_COLLISION:
+                            fi_local_[count][j].life_time = slot_lifetime_frame_;
+                            fi_local_[count][j].sti = recv_tag.sti;
+                            fi_local_[count][j].count_2hop = 1;
+                            fi_local_[count][j].count_3hop = 1;
+                            fi_local_[count][j].busy = SLOT_2HOP;
+                            break;
+                    }
                 }
             }
-        }else if (fi_local_[count].busy == SLOT_2HOP) {//两跳邻居占用
-            if (fi_local_[count].sti != recv_tag.sti && recv_tag.sti != 0) {
-                switch (recv_tag.busy)
-                {
-                    case SLOT_1HOP:
-                        fi_local_[count].count_2hop ++;
-                        fi_local_[count].count_3hop += recv_tag.count_2hop;
-                        break;
-                    case SLOT_2HOP:
-                    case SLOT_FREE:
-                        break;
-                    case SLOT_COLLISION:
-                        fi_local_[count].life_time = slot_lifetime_frame_;
-                        fi_local_[count].sti = recv_tag.sti;
-                        fi_local_[count].count_2hop = 1;
-                        fi_local_[count].count_3hop = 1;
-                        fi_local_[count].busy = SLOT_2HOP;
-                        break;
-                }
-            } else if (fi_local_[count].sti == recv_tag.sti){ //FI记录的id和我一致
-                switch (recv_tag.busy)
-                {
-                    case SLOT_1HOP:
-                        if (recv_tag.sti == append->sti) { //FI发送者是该时隙的占有者
-                            fi_local_[count].busy = SLOT_1HOP;
-                            fi_local_[count].life_time = slot_lifetime_frame_;
-                            if (fi_local_[count].c3hop_flag == 0) {
-                                fi_local_[count].c3hop_flag = 1;
-                                fi_local_[count].count_2hop ++;
-                                fi_local_[count].count_3hop += recv_tag.count_2hop;
-                            }
-                        } else {
-                            fi_local_[count].life_time = slot_lifetime_frame_;
-                            if (fi_local_[count].c3hop_flag == 0) {
-                                fi_local_[count].c3hop_flag = 1;
-                                fi_local_[count].count_2hop ++;
-                                fi_local_[count].count_3hop += recv_tag.count_2hop;
-                            }
-                        }
-                        break;
-                    case SLOT_2HOP:
-                    case SLOT_FREE:
-                    case SLOT_COLLISION:
-                        break;
-                }
-            } else { //STI-slot == 0
-                if (append->sti == fi_local_[count].sti) {
-                    fi_local_[count].life_time = 0;
-                    fi_local_[count].sti = 0;
-                    fi_local_[count].count_2hop = 0;
-                    fi_local_[count].count_3hop = 0;
-                    fi_local_[count].busy = SLOT_FREE;
-                    fi_local_[count].locker = 1;
-                }
-            }
-        } else if (fi_local_[count].busy == SLOT_FREE && fi_local_[count].sti == 0){ //空闲时隙
-            if (fi_local_[count].sti != recv_tag.sti) {
-                switch (recv_tag.busy)
-                {
-                    case SLOT_1HOP:
-                        fi_local_[count].life_time = slot_lifetime_frame_;
-                        fi_local_[count].sti = recv_tag.sti;
-                        fi_local_[count].count_2hop = 1;
-                        fi_local_[count].count_3hop = recv_tag.count_2hop;
-                        fi_local_[count].c3hop_flag = 1;
-                        if (recv_tag.sti == append->sti) { //FI发送者是该时隙的占有者
-                            fi_local_[count].busy = SLOT_1HOP;
-                        } else {
-                            fi_local_[count].busy = SLOT_2HOP;
-                        }
-                        break;
-                    case SLOT_2HOP:
-                        fi_local_[count].count_3hop += recv_tag.count_2hop;
-                        break;
-                    case SLOT_FREE:
-                        break;
-                    case SLOT_COLLISION:
-                        fi_local_[count].life_time = slot_lifetime_frame_;
-                        fi_local_[count].sti = recv_tag.sti;
-                        fi_local_[count].count_2hop = 1;
-                        fi_local_[count].count_3hop = 1;
-                        fi_local_[count].busy = SLOT_2HOP;
-                        break;
-                }
+
+            if (count >= m_frame_len && fi_local_[count][j].sti != 0) {
+                //NS_LOG_DEBUG("I'm node "<<nodeId_<<" I restore frame len from "<<m_frame_len<<" to "<<recv_fi_frame_len);
+                m_frame_len = recv_fi_frame_len;
             }
         }
 
-        if (count >= m_frame_len && fi_local_[count].sti != 0) {
-            //NS_LOG_DEBUG("I'm node "<<global_sti<<" I restore frame len from "<<m_frame_len<<" to "<<recv_fi_frame_len);
-            m_frame_len = recv_fi_frame_len;
-        }
     }
     return;
 }
 
-bool TdmaSatmac::isSingle(void) {
-    slot_tag *fi_local = this->collected_fi_->slot_describe;
-    int count;
+bool Satmac::isSingle(void) {
+    slot_tag **fi_local = this->collected_fi_->slot_describe;
+    int count,j;
     for (count=0; count < m_frame_len; count++){
-        if (fi_local[count].sti != 0 && fi_local[count].sti != global_sti)
-            return false;
+        for(j = 0; j < m_channel_num; j++)
+        {
+            if (fi_local[count][j].sti != 0 && fi_local[count][j].sti != nodeId_)
+                return false;
+        }
+
     }
     return true;
 }
@@ -1398,7 +1253,7 @@ bool TdmaSatmac::isSingle(void) {
  * reduce the remain_time of each of received_fi_list_
  * if the argument time ==0 then clear the received_fi_list_;
  */
-void TdmaSatmac::fade_received_fi_list(int time){   //检查FI链表中的每个FI是否失效，失效则删除
+void Satmac::fade_received_fi_list(int time){   //检查FI链表中的每个FI是否失效，失效则删除
     Frame_info *current, *previous;
     current=this->received_fi_list_;
     previous=NULL;
@@ -1426,60 +1281,64 @@ void TdmaSatmac::fade_received_fi_list(int time){   //检查FI链表中的每个
     }
 }
 
-void TdmaSatmac::synthesize_fi_list(){
+void Satmac::synthesize_fi_list(){
     Frame_info * processing_fi = received_fi_list_;
     int count;
-    slot_tag *fi_local = this->collected_fi_->slot_describe;    //本地的时隙使用信息
+    int j;
+    slot_tag **fi_local = this->collected_fi_->slot_describe;    //本地的时隙使用信息
     //slot_describe指向slot_tag类型的数组，大小=帧长，储存每个时隙的使用信息
 
     bool unlock_flag = 0;
 
     if (node_state_ != NODE_LISTEN && slot_memory_) {
         for (count=0; count < m_frame_len; count++){
-            if (fi_local[count].locker && fi_local[count].sti != 0) {
-                fi_local[count].locker = 0; //the locker must be locked in the last frame.
+            for(j = 0; j < m_channel_num; j++)
+            {
+                if (fi_local[count][j].locker && fi_local[count][j].sti != 0) {
+                    fi_local[count][j].locker = 0; //the locker must be locked in the last frame.
+                } else if (fi_local[count][j].locker)
+                    unlock_flag = 1;
 
-            } else if (fi_local[count].locker)
-                unlock_flag = 1;
+                if ((fi_local[count][j].sti == nodeId_ && (count == slot_num_ || count == slot_adj_candidate_))
+                || fi_local[count][j].sti == 0)
+                    continue;
+                if (fi_local[count][j].life_time > 0)
+                    fi_local[count][j].life_time--;
 
-            if ((fi_local[count].sti == global_sti && (count == slot_num_ || count == slot_adj_candidate_))
-                    || fi_local[count].sti == 0)
-                continue;
-            if (fi_local[count].life_time > 0)
-                fi_local[count].life_time--;
+                if (fi_local[count][j].life_time == 0) {
+                    if (fi_local[count][j].busy == SLOT_2HOP) {
+                        fi_local[count][j].busy = SLOT_FREE;
+                        fi_local[count][j].sti = 0;
+                        fi_local[count][j].count_2hop = 0;
+                        fi_local[count][j].count_3hop = 0;
+                        fi_local[count][j].psf = 0;
+                        fi_local[count][j].c3hop_flag = 0;
+                        fi_local[count][j].life_time = 0;
+                        fi_local[count][j].locker = 0;
+                    } else if (fi_local[count][j].busy == SLOT_1HOP && fi_local[count][j].existed == 1) {
+                        fi_local[count][j].busy = SLOT_2HOP;
+                        fi_local[count][j].life_time = slot_lifetime_frame_-1;
+                        fi_local[count][j].locker = 0;
+                    } else  {
+                        fi_local[count][j].busy = SLOT_FREE;
+                        fi_local[count][j].sti = 0;
+                        fi_local[count][j].count_2hop = 0;
+                        fi_local[count][j].count_3hop = 0;
+                        fi_local[count][j].psf = 0;
+                        fi_local[count][j].c3hop_flag = 0;
+                        fi_local[count][j].life_time = 0;
+                        fi_local[count][j].locker = 1; // lock the status for one frame.
+                    }
 
-            if (fi_local[count].life_time == 0) {
-                if (fi_local[count].busy == SLOT_2HOP) {
-                    fi_local[count].busy = SLOT_FREE;
-                    fi_local[count].sti = 0;
-                    fi_local[count].count_2hop = 0;
-                    fi_local[count].count_3hop = 0;
-                    fi_local[count].psf = 0;
-                    fi_local[count].c3hop_flag = 0;
-                    fi_local[count].life_time = 0;
-                    fi_local[count].locker = 0;
-                } else if (fi_local[count].busy == SLOT_1HOP && fi_local[count].existed == 1) {
-                    fi_local[count].busy = SLOT_2HOP;
-                    fi_local[count].life_time = slot_lifetime_frame_-1;
-                    fi_local[count].locker = 0;
-                } else  {
-                    fi_local[count].busy = SLOT_FREE;
-                    fi_local[count].sti = 0;
-                    fi_local[count].count_2hop = 0;
-                    fi_local[count].count_3hop = 0;
-                    fi_local[count].psf = 0;
-                    fi_local[count].c3hop_flag = 0;
-                    fi_local[count].life_time = 0;
-                    fi_local[count].locker = 1; // lock the status for one frame.
+                } else if (fi_local[count][j].busy != SLOT_COLLISION
+                        && fi_local[count][j].life_time == 0) {
+
+                    fi_local[count][j].busy = SLOT_FREE;
                 }
 
-            } else if (fi_local[count].busy != SLOT_COLLISION
-                    && fi_local[count].life_time == 0) {
-
-                fi_local[count].busy = SLOT_FREE;
+                fi_local[count][j].existed = 0;
             }
 
-            fi_local[count].existed = 0;
         }
     }
 
@@ -1490,8 +1349,11 @@ void TdmaSatmac::synthesize_fi_list(){
 
     if (unlock_flag) {
         for (count=0; count < m_frame_len; count++){
-            if (fi_local[count].locker && fi_local[count].sti == 0) {
-                fi_local[count].locker = 0; //the locker must be locked in the last frame.
+            for(j = 0; j < m_channel_num; j++)
+            {
+                if (fi_local[count][j].locker && fi_local[count][j].sti == 0) {
+                    fi_local[count][j].locker = 0; //the locker must be locked in the last frame.
+                }
             }
         }
     }
@@ -1500,23 +1362,28 @@ void TdmaSatmac::synthesize_fi_list(){
 
 }
 
-bool TdmaSatmac::adjust_is_needed(int slot_num) {
-    slot_tag *fi_collection = this->collected_fi_->slot_describe;
-    int i,free_count_ths = 0, free_count_ehs = 0;
+bool Satmac::adjust_is_needed(int slot_num) {
+    slot_tag **fi_collection = this->collected_fi_->slot_describe;
+    int i,j,free_count_ths = 0, free_count_ehs = 0;
 
     int s0_1c_num = 0;
 
+    // 当频率需要调整时，需要改
     for(i=0 ; i < m_frame_len; i++){
-        if (fi_collection[i].busy== SLOT_FREE)
-            free_count_ths++;
-        if(fi_collection[i].busy== SLOT_FREE && fi_collection[i].count_3hop == 0) {
-            free_count_ehs++;
-            if (i < m_frame_len/2)
-                s0_1c_num++;
+        for(j = 0;j < m_channel_num; j++)
+        {
+            if (fi_collection[i][j].busy== SLOT_FREE)
+                free_count_ths++;
+            if(fi_collection[i][j].busy== SLOT_FREE && fi_collection[i][j].count_3hop == 0) {
+                free_count_ehs++;
+                if (i < m_frame_len/2)
+                    s0_1c_num++;
+            }
         }
+
     }
 
-    if (adj_ena_ && fi_collection[slot_num].count_3hop >= c3hop_threshold_ && free_count_ehs >= adj_free_threshold_) {
+    if (adj_ena_ && fi_collection[slot_num][j].count_3hop >= c3hop_threshold_ && free_count_ehs >= adj_free_threshold_) {
         return true;
     } else if (adj_frame_ena_ && slot_num >= m_frame_len/2
             && m_frame_len > adj_frame_lower_bound_
@@ -1529,25 +1396,29 @@ bool TdmaSatmac::adjust_is_needed(int slot_num) {
 }
 
 
-void TdmaSatmac::adjFrameLen()
+void Satmac::adjFrameLen()
 {
     if (!adj_frame_ena_)
         return;
     //calculate slot utilization
-    int i;
+    int i,j;
     int free_count_ths = 0, free_count_ehs = 0;
     float utilrate_ths, utilrate_ehs;
     bool cutflag = true;
-    slot_tag *fi_local_= this->collected_fi_->slot_describe;
+    slot_tag **fi_local_= this->collected_fi_->slot_describe;
     for(i=0 ; i < m_frame_len; i++){
-        if(fi_local_[i].busy != SLOT_FREE) {
-            if (i >= m_frame_len/2)
-                cutflag = false;
+        for(j = 0; j < m_channel_num; j++)
+        {
+            if(fi_local_[i][j].busy != SLOT_FREE) {
+                if (i >= m_frame_len/2)
+                    cutflag = false;
+            }
+            if (fi_local_[i][j].busy== SLOT_FREE)
+                free_count_ths++;
+            if(fi_local_[i][j].busy== SLOT_FREE && fi_local_[i][j].count_3hop == 0)
+                free_count_ehs++;
         }
-        if (fi_local_[i].busy== SLOT_FREE)
-            free_count_ths++;
-        if(fi_local_[i].busy== SLOT_FREE && fi_local_[i].count_3hop == 0)
-            free_count_ehs++;
+
     }
 
     utilrate_ths = (float)(m_frame_len - free_count_ths)/m_frame_len;
@@ -1585,241 +1456,105 @@ void TdmaSatmac::adjFrameLen()
 
 }
 
-
-Time
-TdmaSatmac::CalculateTxTime (Ptr<const Packet> packet)
-{
-  NS_LOG_FUNCTION (*packet);
-  NS_ASSERT_MSG (packet->GetSize () < 1500,"PacketSize must be less than 1500B, it is: " << packet->GetSize ());
-  return m_bps.CalculateBytesTxTime (packet->GetSize ());
-}
-
-void TdmaSatmac::generate_send_FI_packet(){
+void Satmac::generate_send_FI_packet(){
 #ifdef PRINT_SLOT_STATUS
 
-    std::cout<<"Time "<< NOW <<" I'm node "<<global_sti<<" in slot "<<slot_count_<<
+    std::cout<<"Time "<< NOW <<" I'm node "<<nodeId_<<" in slot "<<slot_count_<<
             ", I send an FI, loc:" << getCoord().x << ", " <<
             getCoord().y <<
             " channel util: " << get_channel_utilization() <<std::endl;
 
-//  if(global_sti == 9) {
+//  if(nodeId_ == 9) {
 //      double t = get_channel_utilization() ;
 //      std::cout<< t << std::endl;
 //      std::cout<< std::endl;
 //      std::cout<< std::endl;
 //  }
 #endif
-    slot_tag *fi_local_= this->collected_fi_->slot_describe;
-    std::vector<slot_tag> slotTag;
-    for(int i = 0;i < m_frame_len; i++)
+    slot_tag **fi_local_= this->collected_fi_->slot_describe;
+    std::vector<std::vector<slot_tag>> slotTag;
+    for(int i = 0; i < m_frame_len; i++)
     {
-        slot_tag st;
-        st.busy = fi_local_[i].busy;
-        st.sti = fi_local_[i].sti;
-        st.count_2hop = fi_local_[i].count_2hop;
-        slotTag.push_back(st);
+        std::vector<slot_tag> v;
+        for(int j = 0; j < m_channel_num; j++)
+        {
+            slot_tag stfs;
+            stfs.busy = fi_local_[i][j].busy;
+            stfs.sti = fi_local_[i][j].sti;
+            stfs.count_2hop = fi_local_[i][j].count_2hop;
+            stfs.psf = fi_local_[i][j].psf;
+            v.push_back(stfs);
+        }
+        slotTag.push_back(v);
     }
 
-    SatmacPacket *satmac_pkt = new SatmacPacket("SatmacPacket");
-    satmac_pkt->setFrameLength(m_frame_len);
-    satmac_pkt->setGlobleSti(global_sti);
-    satmac_pkt->setSlotTag(slotTag);
 
-    switch (this->node_state_)
+    SatmacSchedulingGrant* satmacGrant = new SatmacSchedulingGrant("SatmacGrant");
+
+    satmacGrant->setNumberSubchannels(1);
+    int initiailSubchannel = 0;
+    int finalSubchannel = initiailSubchannel + satmacGrant->getNumSubchannels();
+
+    RbMap grantedBlocks; //已授权的RBs
+    int totalGrantedBlocks = 0;
+    for (int i = initiailSubchannel;i < finalSubchannel;i++)
     {
-        case NODE_WORK_FI:
-        case NODE_WORK_ADJ:
-            sendLowerPackets(satmac_pkt);
-            break;
-        default: break;
+        int initialBand = i * subchannelSize_;
+        for (Band b = initialBand; b < initialBand + subchannelSize_ ; b++)
+        {
+            grantedBlocks[MACRO][b] = 1; //每个 band 上的 RBs 数量为1
+            ++totalGrantedBlocks;
+        }
     }
+
+    satmacGrant->setPeriod(m_frame_len);
+    satmacGrant->setFrameLength(m_frame_len);
+    satmacGrant->setGlobleSti(nodeId_);
+    satmacGrant->setChannelNumber(1);
+    satmacGrant->setSlotTag(slotTag);
+    satmacGrant->setGrantedBlocks(grantedBlocks);
+    satmacGrant->setTotalGrantedBlocks(totalGrantedBlocks);
+    satmacGrant->setDirection(D2D_MULTI);
+    satmacGrant->setCodewords(1);
+    satmacGrant->setStartingSubchannel(initiailSubchannel);
+    satmacGrant->setMcs(1);
+    satmacGrant->setExpiration(m_frame_len);
+
+    LteMod mod = _QPSK;
+    unsigned int i = 0;
+    const unsigned int* tbsVect = itbs2tbs(mod, SINGLE_ANTENNA_PORT0, 1, 1 - i);
+    maximumCapacity_ = tbsVect[totalGrantedBlocks-1];
+    satmacGrant->setGrantedCwBytes(currentCw_, maximumCapacity_);
+    // Simply flips the codeword.
+    currentCw_ = MAX_CODEWORDS - currentCw_;
+
+    schedulingGrant_ = satmacGrant;
 
     send_fi_count_++;
-}
-
-void TdmaSatmac::WaitWifiState()
-{
-    if (m_transmissionListener->isTxok()) //像是传输ok？
-//  if (!(this->getWifiPhy()->IsStateTx ()) && !(this->getWifiPhy()->IsStateSwitching ()))
-    {
-        m_transmissionListener->setTxok(false);
-        switch (this->node_state_)
-        {
-        case NODE_WORK_FI:
-        case NODE_WORK_ADJ:
-            StartTransmission(m_slotRemainTime);
-            break;
-        default: break;
-        }
-    } else {
-        m_slotRemainTime -= 50;
-        Simulator::Schedule (MicroSeconds(50), &TdmaSatmac::WaitWifiState, this);
-    }
-}
-
-void
-TdmaSatmac::SendFiDown (Ptr<Packet> packet, WifiMacHeader header)
-{
-  if (m_wifimaclow_flag)
-  {
-      MacLowTransmissionParameters params;
-      //params.DisableOverrideDurationId ();
-      params.DisableRts ();
-      params.DisableAck ();
-      params.DisableNextData ();
-      WifiTxVector txVector = this->getWifiMacLow()->GetDataTxVector (packet, &header);
-      //Time txDuration = this->getWifiPhy()->CalculateTxDuration (packet->GetSize (), txVector,  this->getWifiPhy()->GetFrequency ());
-      Time txDuration = this->getWifiPhy()->CalculateTxDuration (GetSize (packet, &header, false), txVector, this->getWifiPhy()->GetFrequency ());
-      txDuration += this->getWifiPhy()->GetGuardInterval();
-//            this->getWifiPhy()->CalculateTxDuration (packet->GetSize (), txVector, WIFI_PREAMBLE_LONG, this->getWifiPhy()->GetFrequency ());
-//    txDuration += this->getWifiMacLow()->GetSifs();
-      m_slotRemainTime -= txDuration.GetMicroSeconds();
-      m_wifimaclow->StartTransmission (packet,
-                                     &header,
-                                     params,
-                                     m_transmissionListener);
-      switch (this->node_state_)
-      {
-      case NODE_WORK_FI:
-      case NODE_WORK_ADJ:
-        Simulator::Schedule (txDuration, &TdmaSatmac::StartTransmission, this,m_slotRemainTime);
-        break;
-      default: break;
-      }
-//    WaitWifiState();
-  } else {
-      m_low->StartTransmission (packet, &header);
-      NotifyTx (packet);
-      switch (this->node_state_)
-      {
-        case NODE_WORK_FI:
-        case NODE_WORK_ADJ:
-            StartTransmission(m_slotRemainTime);
-            break;
-        default: break;
-      }
-  }
-
-}
-
-//涉及到包的存储
-void
-TdmaSatmac::StartTransmission (uint64_t transmissionTimeUs)
-{
-  //NS_LOG_DEBUG (transmissionTimeUs << " usec");
-
-  simtime_t totalTransmissionSlot = Simtime(transmissionTimeUs, SIMTIME_US);
-//  if (m_queue->IsEmpty ())
-//  {
-//      //NS_LOG_DEBUG ("queue empty");
-//      return;
-//  }
-  HarqRxBuffers::iterator hit = harqRxBuffers_.begin();
-  HarqRxBuffers::iterator het = harqRxBuffers_.end();
-  LteMacPdu *pdu = NULL;
-  std::list<LteMacPdu*> pduList;
-
-  for (; hit != het; ++hit)
-  {
-      pduList=hit->second->extractCorrectPdus();
-      while (! pduList.empty())
-      {
-          pdu=pduList.front();
-          pduList.pop_front();
-          macPduUnmake(pdu);
-      }
-  }
-  //printf("Time: %ld  ", Simulator::Now().GetMicroSeconds());
-  //printf("I'm node %d, I start send data pkt\n",global_sti);
-
-  WifiMacHeader header;
-  Ptr<const Packet> peekPacket = m_queue->Peek (&header);
-  if (m_wifimaclow_flag)
-  {
-      WifiTxVector txVector = this->getWifiMacLow()->GetDataTxVector (peekPacket, &header);
-      Time txDuration = this->getWifiPhy()->CalculateTxDuration (GetSize (peekPacket, &header, false), txVector, this->getWifiPhy()->GetFrequency ());
-
-//    txDuration += this->getWifiMacLow()->GetSifs();
-      if (m_slotRemainTime >= txDuration.GetMicroSeconds())
-      {
-          m_slotRemainTime -= txDuration.GetMicroSeconds();
-          m_lastpktUsedTime = txDuration.GetMicroSeconds();
-          SendPacketDown(MicroSeconds(m_slotRemainTime));
-      } else {
-          //std::cout << "Packet takes more time to transmit than the slot allotted. Will send in next slot" << std::endl;
-          NS_LOG_DEBUG ("Packet takes more time to transmit than the slot allotted. Will send in next slot");
-      }
-  } else {
-      Time packetTransmissionTime = CalculateTxTime (peekPacket);
-      m_lastpktUsedTime = packetTransmissionTime.GetMicroSeconds();
-      NS_LOG_DEBUG ("Packet TransmissionTime(microSeconds): " << packetTransmissionTime.GetMicroSeconds () << "usec");
-      if (packetTransmissionTime < totalTransmissionSlot)
-        {
-          totalTransmissionSlot -= packetTransmissionTime;
-          m_slotRemainTime -= packetTransmissionTime.GetMicroSeconds ();
-          Simulator::Schedule (packetTransmissionTime, &TdmaSatmac::SendPacketDown, this,totalTransmissionSlot);
-        }
-      else
-        {
-          NS_LOG_DEBUG ("Packet takes more time to transmit than the slot allotted. Will send in next slot");
-        }
-  }
-}
-
-void
-TdmaSatmac::SendPacketDown (Time remainingTime)
-{
-  WifiMacHeader header;
-  Ptr<const Packet> packet = m_queue->Dequeue (&header);
-  if (m_wifimaclow_flag)
-  {
-      MacLowTransmissionParameters params;
-//    params.DisableOverrideDurationId ();
-      params.DisableRts ();
-
-//    if (header.GetAddr1 ().IsGroup())
-//    {
-//        params.DisableAck();
-//    } else
-//        params.EnableAck ();
-      params.DisableAck ();
-//    params.DisableNextData ();
-      header.SetDuration(MicroSeconds(m_lastpktUsedTime));
-      m_wifimaclow->StartTransmission (packet,
-                                     &header,
-                                     params,
-                                     m_transmissionListener);
-
-//    std::cout<<"satmac send a pkt Size "<<m_lastpktUsedTime <<" fromSti = " << this->GetGlobalSti()<<" to addr "<<header.GetAddr1 () << " from addr "<< header.GetAddr2 ()<< " Time "<< Simulator::Now().GetMicroSeconds()<< std::endl;
-  } else
-      m_low->StartTransmission (packet, &header);
-//  TxQueueStart (0);
-  NotifyTx (packet);
-//  TxQueueStart (0);
-  if (m_wifimaclow_flag)
-  {
-//    Time txDuration = this->getWifiMacLow()->GetLastPktTxDuration();
-//    m_slotRemainTime -=
-      Simulator::Schedule (MicroSeconds(m_lastpktUsedTime), &TdmaSatmac::StartTransmission, this,remainingTime.GetMicroSeconds ());
-  } else
-      StartTransmission (remainingTime.GetMicroSeconds ());
+    periodCounter_= satmacGrant->getPeriod();
+    //expirationCounter_= (mode4Grant->getResourceReselectionCounter() * periodCounter_) + 1;
+    emit(grantRequests, 1);
 }
 
 //直接copy
-double TdmaSatmac::get_channel_utilization()
+double Satmac::get_channel_utilization()
 {
-    slot_tag *fi_local_= this->collected_fi_->slot_describe;
+    slot_tag **fi_local_= this->collected_fi_->slot_describe;
     int count = 0;
     for(int i=0 ; i < m_frame_len; i++){
-        if(fi_local_[i].busy != SLOT_FREE) {
-            count++;
+        for(int j = 0;j < m_channel_num; j++)
+        {
+            if(fi_local_[i][j].busy != SLOT_FREE) {
+                count++;
+            }
         }
+
     }
     return ((double)count)/((double)m_frame_len);
 }
 
 //#include "ns3/vector.h"
-int getdir(Coord cur, Coord last)
+int getdir(inet::Coord cur, inet::Coord last)
 {
     double deltax = cur.x - last.x;
     double deltay = cur.y - last.y;
@@ -1834,129 +1569,32 @@ int getdir(Coord cur, Coord last)
 }
 
 void
-TdmaSatmac::slotHandler ()
+Satmac::slotHandler ()
 {
   //NS_LOG_FUNCTION_NOARGS ();
-  slot_tag *fi_collection = this->collected_fi_->slot_describe;
+
+  slot_tag **fi_collection = this->collected_fi_->slot_describe;
   // Restart timer for next slot.
   total_slot_count_ = total_slot_count_+1;
   slot_count_ = total_slot_count_ %  m_frame_len;
   //Simulator::Schedule (GetSlotTime(), &TdmaSatmac::slotHandler, this); 需要放进handleselfmessage中
 
-//  std::cout<<"Start time:" << Simulator::Now().GetMicroSeconds() << std::endl;
-
-  //位置初始化
-//  if (vemac_mode_ == 1 && location_initialed_ == false) {
-//    Mobility_ = m_nodePtr->GetObject<MobilityModel> (); //mobility-model 跟踪对象的当前位置和速度
-//    location_initialed_ = true;
-//    curr_location_ = Mobility_->GetPosition();
-//    last_location_ = curr_location_;
-//    return;
-//    //Vector dir = model->GetVelocity();
-//    //printf("%f, %f, %f, %d\n", current_loc.x, current_loc.y, current_loc.z, direction_);
-//  }
-  if (vemac_mode_ == 1 && location_initialed_ == false) {
-      location_initialed_ = true;
-      curr_location_ = getCoord();
-      last_location_ = curr_location_;
-      return;
-  }
-
-
-  //方向初始化
-//  if (vemac_mode_ == 1 && direction_initialed_ == false)
-//  {
-//        curr_location_ = m_nodePtr->GetObject<MobilityModel> ()->GetPosition();
-//        if (curr_location_.x == last_location_.x && curr_location_.y == last_location_.y) {
-//            synthesize_fi_list();
-//            this->fade_received_fi_list(1);
-//            return;
-//        }
-//        direction_initialed_ = true;
-//        direction_ = getdir(curr_location_, last_location_);
-//        last_location_ = curr_location_;
-//  }
-  if (vemac_mode_ == 1 && direction_initialed_ == false)
-    {
-          curr_location_ = getCoord();
-          if (curr_location_.x == last_location_.x && curr_location_.y == last_location_.y) {
-              synthesize_fi_list();
-              this->fade_received_fi_list(1);
-              return;
-          }
-          direction_initialed_ = true;
-          direction_ = getdir(curr_location_, last_location_);
-          last_location_ = curr_location_;
-    }
   m_slotRemainTime = m_slotTime;
 
   slot_state_ = BEGINING;
 
   this->fade_received_fi_list(1);
-/*
-  if(this->enable == 0){
-      double x,y,z;
-      ((CMUTrace *)this->downtarget_)->getPosition(&x,&y,&z);
-      if(z == 0){
-          this->enable = 1;
-          slot_num_ = (slot_count_+1)% m_frame_len; //slot_num_初始化为当前的下一个时隙。
-      }
-  }
-  else if(this->enable == 1){
-      double x,y,z;
-      ((CMUTrace *)this->downtarget_)->getPosition(&x,&y,&z);
-      if(z > 0 ){
-          this->enable = 0;
-          //slot_num_ = (slot_count_+1)% m_frame_len;
-      }
-  }
-*/
-//TODO: 加一个开启的命令。。
-//  if(this->enable == 0){
-//    return;
-//  }
 
-  if (NOW - SimTime(last_log_time_,SIMTIME_MS) >= 1000) {
-      last_log_time_ = NOW;
-
-      /**
-       * LPF
-       */
-      double x = getCoord().x;
-      double y = getCoord().y;
-      std::ofstream out (m_traceOutFile, std::ios::app);
-      //*m_log_lpf_stream->GetStream()
-      out << "m "<< NOW <<" t["<<slot_num_<<"] _"<<global_sti<<
-        "_ LPF "<<waiting_frame_count<<" "<<request_fail_times<<" "<<collision_count_<<" "<<
-        frame_count_<<" "<<continuous_work_fi_max_<<" "<<adj_count_success_<<" "<<
-        adj_count_total_<<" "<<send_fi_count_<<" "<<recv_fi_count_<<" "<<
-        no_avalible_count_<<" "<<slot_num_<<" "<<m_frame_len<<" "<<localmerge_collision_count_
-        <<" "<<"x:" << x <<" "<<"y"<< y <<" "<<get_channel_utilization()<<std::endl;
-
-      out.close ();
-  }
-
-  //NS_ASSERT_MSG (slot_num_ <= m_frame_len, "FATAL! slot_num_ > m_frame_len" << this->GetGlobalSti());
-
-  if (slot_count_ == slot_num_){
+  if (slot_count_ == slot_num_)
+  {
       frame_count_++;
-
-      if (m_start_delay_frames > 0) {
+      if (m_start_delay_frames > 0)
+      {
           --m_start_delay_frames;
           return;
       }
-
-
-      if (vemac_mode_ == 1 ) {
-
-            curr_location_ = getCoord();
-            //Vector dir = model->GetVelocity();
-            direction_ = getdir(curr_location_, last_location_);
-            last_location_ = curr_location_;
-            //printf("%f, %f, %f, %d\n", current_loc.x, current_loc.y, current_loc.z, direction_);
-      }
-
-      switch (node_state_) {
+      switch (node_state_)
+      {
       case NODE_INIT:// the first whole slot of a newly initialized node, it begin to listen
           node_state_ = NODE_LISTEN;
           waiting_frame_count =0;
@@ -1974,7 +1612,7 @@ TdmaSatmac::slotHandler ()
           waiting_frame_count++;
 
           if (backoff_frame_num_) {
-//            printf("%d : %d\n",global_sti,backoff_frame_num_);
+//            printf("%d : %d\n",nodeId_,backoff_frame_num_);
               backoff_frame_num_--;
               return;
           }
@@ -1990,24 +1628,24 @@ TdmaSatmac::slotHandler ()
               no_avalible_count_++;
               backoff_frame_num_ = intuniform(0, 20);
 #ifdef PRINT_SLOT_STATUS
-                printf("I'm node %d, in slot %d, NODE_LISTEN and I cannot choose a BCH!!\n", global_sti, slot_count_);
+                printf("I'm node %d, in slot %d, NODE_LISTEN and I cannot choose a BCH!!\n", nodeId_, slot_count_);
 #endif
-              //NS_LOG_DEBUG("I'm node "<<global_sti<<", in slot "<<slot_count_<<", NODE_LISTEN and I cannot choose a BCH!!");
+              //NS_LOG_DEBUG("I'm node "<<nodeId_<<", in slot "<<slot_count_<<", NODE_LISTEN and I cannot choose a BCH!!");
 
               return;
           }
 #ifdef PRINT_SLOT_STATUS
-            printf("I'm node %d, in slot %d, NODE_LISTEN, choose: %d\n", global_sti, slot_count_, slot_num_);
+            printf("I'm node %d, in slot %d, NODE_LISTEN, choose: %d\n", nodeId_, slot_count_, slot_num_);
 #endif
-          //NS_LOG_DEBUG("I'm node "<<global_sti<<", in slot "<<slot_count_<<", NODE_LISTEN, choose: "<<slot_num_);
+          //NS_LOG_DEBUG("I'm node "<<nodeId_<<", in slot "<<slot_count_<<", NODE_LISTEN, choose: "<<slot_num_);
 
           //如果正好决定的时隙就是本时隙，那么直接发送
           if(slot_num_== slot_count_){
-              fi_collection[slot_count_].busy = SLOT_1HOP;
-              fi_collection[slot_count_].sti = global_sti;
-              fi_collection[slot_count_].count_2hop = 1;
-              fi_collection[slot_count_].count_3hop = 1;
-              fi_collection[slot_count_].psf = 0;
+              fi_collection[slot_count_][0].busy = SLOT_1HOP;
+              fi_collection[slot_count_][0].sti = nodeId_;
+              fi_collection[slot_count_][0].count_2hop = 1;
+              fi_collection[slot_count_][0].count_3hop = 1;
+              fi_collection[slot_count_][0].psf = 0;
               generate_send_FI_packet(); //必须在BCH状态设置完之后调用。
               node_state_ = NODE_REQUEST;
               return;
@@ -2018,31 +1656,30 @@ TdmaSatmac::slotHandler ()
           }
           break;
       case NODE_WAIT_REQUEST:
-
           waiting_frame_count++;
           if (!slot_memory_) {
               this->clear_others_slot_status();
               fi_collection = this->collected_fi_->slot_describe;
           }
           synthesize_fi_list();
-          if((fi_collection[slot_count_].sti == global_sti && fi_collection[slot_count_].busy == SLOT_1HOP)
-                  || fi_collection[slot_count_].sti == 0) {
-              fi_collection[slot_count_].busy = SLOT_1HOP;
-              fi_collection[slot_count_].sti = global_sti;
-              fi_collection[slot_count_].count_2hop = 1;
-              fi_collection[slot_count_].count_3hop = 1;
-              fi_collection[slot_count_].psf = 0;
+          if((fi_collection[slot_count_][0].sti == nodeId_ && fi_collection[slot_count_][0].busy == SLOT_1HOP)
+                  || fi_collection[slot_count_][0].sti == 0) {
+              fi_collection[slot_count_][0].busy = SLOT_1HOP;
+              fi_collection[slot_count_][0].sti = nodeId_;
+              fi_collection[slot_count_][0].count_2hop = 1;
+              fi_collection[slot_count_][0].count_3hop = 1;
+              fi_collection[slot_count_][0].psf = 0;
               generate_send_FI_packet();
               node_state_ = NODE_REQUEST;
               return;
           } else {
-              if (fi_collection[slot_count_].sti == global_sti) {
-                  fi_collection[slot_count_].busy = SLOT_FREE;
-                  fi_collection[slot_count_].sti = 0;
-                  fi_collection[slot_count_].count_2hop = 0;
-                  fi_collection[slot_count_].count_3hop = 0;
-                  fi_collection[slot_count_].psf = 0;
-                  fi_collection[slot_count_].locker = 1;
+              if (fi_collection[slot_count_][0].sti == nodeId_) {
+                  fi_collection[slot_count_][0].busy = SLOT_FREE;
+                  fi_collection[slot_count_][0].sti = 0;
+                  fi_collection[slot_count_][0].count_2hop = 0;
+                  fi_collection[slot_count_][0].count_3hop = 0;
+                  fi_collection[slot_count_][0].psf = 0;
+                  fi_collection[slot_count_][0].locker = 1;
               }
               request_fail_times++;
 
@@ -2051,18 +1688,18 @@ TdmaSatmac::slotHandler ()
               if(slot_num_ < 0 || slot_num_== slot_count_){
                   node_state_ = NODE_LISTEN;
                   no_avalible_count_ ++;
-                  backoff_frame_num_ = m_uniformRandomVariable->GetInteger (0, 20);
+                  backoff_frame_num_ = intuniform(0, 20);
                   slot_num_ = slot_count_;
-                  //NS_LOG_DEBUG("I'm node "<<global_sti<<", in slot "<<slot_count_<<", NODE_WAIT_REQUEST and I cannot choose a BCH!!");
+                  //NS_LOG_DEBUG("I'm node "<<nodeId_<<", in slot "<<slot_count_<<", NODE_WAIT_REQUEST and I cannot choose a BCH!!");
 #ifdef PRINT_SLOT_STATUS
-                    printf("I'm node %d, in slot %d, NODE_WAIT_REQUEST and I cannot choose a BCH!!\n", global_sti, slot_count_);
+                    printf("I'm node %d, in slot %d, NODE_WAIT_REQUEST and I cannot choose a BCH!!\n", nodeId_, slot_count_);
 #endif
                   return;
               }
 #ifdef PRINT_SLOT_STATUS
-                printf("I'm node %d, in slot %d, NODE_WAIT_REQUEST and current bch is unvalid, choose: %d\n", global_sti, slot_count_, slot_num_);
+                printf("I'm node %d, in slot %d, NODE_WAIT_REQUEST and current bch is unvalid, choose: %d\n", nodeId_, slot_count_, slot_num_);
 #endif
-              //NS_LOG_DEBUG("I'm node "<<global_sti<<", in slot "<<slot_count_<<", NODE_WAIT_REQUEST and current bch is unvalid, choose: "<<slot_num_);
+              //NS_LOG_DEBUG("I'm node "<<nodeId_<<", in slot "<<slot_count_<<", NODE_WAIT_REQUEST and current bch is unvalid, choose: "<<slot_num_);
               node_state_ = NODE_WAIT_REQUEST;
               return;
           }
@@ -2073,21 +1710,21 @@ TdmaSatmac::slotHandler ()
               fi_collection = this->collected_fi_->slot_describe;
           }
           synthesize_fi_list();
-          if((fi_collection[slot_count_].sti == global_sti && fi_collection[slot_count_].busy == SLOT_1HOP)
-                  || fi_collection[slot_count_].sti == 0) {
+          if((fi_collection[slot_count_][0].sti == nodeId_ && fi_collection[slot_count_][0].busy == SLOT_1HOP)
+                  || fi_collection[slot_count_][0].sti == 0) {
 
               node_state_ = NODE_WORK_FI;
 
               generate_send_FI_packet();
           } else {
               waiting_frame_count++;
-              if (fi_collection[slot_count_].sti == global_sti) {
-                  fi_collection[slot_count_].busy = SLOT_FREE;
-                  fi_collection[slot_count_].sti = 0;
-                  fi_collection[slot_count_].count_2hop = 0;
-                  fi_collection[slot_count_].count_3hop = 0;
-                  fi_collection[slot_count_].psf = 0;
-                  fi_collection[slot_count_].locker = 1;
+              if (fi_collection[slot_count_][0].sti == nodeId_) {
+                  fi_collection[slot_count_][0].busy = SLOT_FREE;
+                  fi_collection[slot_count_][0].sti = 0;
+                  fi_collection[slot_count_][0].count_2hop = 0;
+                  fi_collection[slot_count_][0].count_3hop = 0;
+                  fi_collection[slot_count_][0].psf = 0;
+                  fi_collection[slot_count_][0].locker = 1;
               }
 
               request_fail_times++;
@@ -2096,18 +1733,18 @@ TdmaSatmac::slotHandler ()
               if(slot_num_ < 0 || slot_num_== slot_count_){
                   node_state_ = NODE_LISTEN;
                   no_avalible_count_ ++;
-                  backoff_frame_num_ = m_uniformRandomVariable->GetInteger (0, 20);
+                  backoff_frame_num_ = intuniform(0, 20);
                   slot_num_ = slot_count_;
 #ifdef PRINT_SLOT_STATUS
-                    printf("I'm node %d, in slot %d, NODE_REQUEST and I cannot choose a BCH!!\n", global_sti, slot_count_);
+                    printf("I'm node %d, in slot %d, NODE_REQUEST and I cannot choose a BCH!!\n", nodeId_, slot_count_);
 #endif
-                  //NS_LOG_DEBUG("I'm node "<<global_sti<<", in slot "<<slot_count_<<", NODE_REQUEST and I cannot choose a BCH!!");
+                  //NS_LOG_DEBUG("I'm node "<<nodeId_<<", in slot "<<slot_count_<<", NODE_REQUEST and I cannot choose a BCH!!");
                   return;
               }
 #ifdef PRINT_SLOT_STATUS
-                printf("I'm node %d, in slot %d, NODE_REQUEST and current bch is unvalid, choose: %d\n", global_sti, slot_count_, slot_num_);
+                printf("I'm node %d, in slot %d, NODE_REQUEST and current bch is unvalid, choose: %d\n", nodeId_, slot_count_, slot_num_);
 #endif
-             //NS_LOG_DEBUG("I'm node "<<global_sti<<", in slot "<<slot_count_<<", NODE_REQUEST and current bch is unvalid, choose: "<<slot_num_);
+             //NS_LOG_DEBUG("I'm node "<<nodeId_<<", in slot "<<slot_count_<<", NODE_REQUEST and current bch is unvalid, choose: "<<slot_num_);
               node_state_ = NODE_WAIT_REQUEST;
               return;
           }
@@ -2119,39 +1756,39 @@ TdmaSatmac::slotHandler ()
           }
           synthesize_fi_list();
 
-          if((fi_collection[slot_count_].sti == global_sti && fi_collection[slot_count_].busy == SLOT_1HOP)
-                  || fi_collection[slot_count_].sti == 0)//BCH可用
+          if((fi_collection[slot_count_][0].sti == nodeId_ && fi_collection[slot_count_][0].busy == SLOT_1HOP)
+                  || fi_collection[slot_count_][0].sti == 0)//BCH可用
           {
               continuous_work_fi_ ++;
               continuous_work_fi_max_ = (continuous_work_fi_max_ > continuous_work_fi_)?continuous_work_fi_max_:continuous_work_fi_;
               if (adjust_is_needed(slot_num_)) {
                   slot_adj_candidate_ = determine_BCH(1);
-                  //NS_LOG_DEBUG("I'm node "<<global_sti<<", in slot "<<slot_count_<<", NODE_WORK_FI ADJ is needed! choose: "<<slot_adj_candidate_);
+                  //NS_LOG_DEBUG("I'm node "<<nodeId_<<", in slot "<<slot_count_<<", NODE_WORK_FI ADJ is needed! choose: "<<slot_adj_candidate_);
                   if (slot_adj_candidate_ >= 0) {
                       if (adj_single_slot_ena_) {
                           node_state_ = NODE_WORK_FI;
                           adj_count_success_++;
                           slot_num_ = slot_adj_candidate_;
-                          fi_collection[slot_count_].busy = SLOT_FREE;
-                          fi_collection[slot_count_].sti = 0;
-                          fi_collection[slot_count_].count_2hop = 0;
-                          fi_collection[slot_count_].count_3hop = 0;
-                          fi_collection[slot_count_].psf = 0;
-                          fi_collection[slot_count_].locker = 0;
+                          fi_collection[slot_count_][0].busy = SLOT_FREE;
+                          fi_collection[slot_count_][0].sti = 0;
+                          fi_collection[slot_count_][0].count_2hop = 0;
+                          fi_collection[slot_count_][0].count_3hop = 0;
+                          fi_collection[slot_count_][0].psf = 0;
+                          fi_collection[slot_count_][0].locker = 0;
 
-                          fi_collection[slot_num_].busy = SLOT_1HOP;
-                          fi_collection[slot_num_].sti = global_sti;
-                          fi_collection[slot_num_].count_2hop = 1;
-                          fi_collection[slot_num_].count_3hop = 1;
-                          fi_collection[slot_num_].psf = 0;
+                          fi_collection[slot_num_][0].busy = SLOT_1HOP;
+                          fi_collection[slot_num_][0].sti = nodeId_;
+                          fi_collection[slot_num_][0].count_2hop = 1;
+                          fi_collection[slot_num_][0].count_3hop = 1;
+                          fi_collection[slot_num_][0].psf = 0;
                       } else {
                           node_state_ = NODE_WORK_ADJ;
                           adj_count_total_++;
-                          fi_collection[slot_adj_candidate_].busy = SLOT_1HOP;
-                          fi_collection[slot_adj_candidate_].sti = global_sti;
-                          fi_collection[slot_adj_candidate_].count_2hop = 1;
-                          fi_collection[slot_adj_candidate_].count_3hop = 1;
-                          fi_collection[slot_adj_candidate_].psf = 0;
+                          fi_collection[slot_adj_candidate_][0].busy = SLOT_1HOP;
+                          fi_collection[slot_adj_candidate_][0].sti = nodeId_;
+                          fi_collection[slot_adj_candidate_][0].count_2hop = 1;
+                          fi_collection[slot_adj_candidate_][0].count_3hop = 1;
+                          fi_collection[slot_adj_candidate_][0].psf = 0;
                       }
                   }
               } else
@@ -2163,18 +1800,18 @@ TdmaSatmac::slotHandler ()
               if (random_bch_if_single_switch_ && isSingle()) {
                   if (bch_slot_lock_-- == 0) {
                       slot_num_ = determine_BCH(0);
-                      fi_collection[slot_count_].busy = SLOT_FREE;
-                      fi_collection[slot_count_].sti = 0;
-                      fi_collection[slot_count_].count_2hop = 0;
-                      fi_collection[slot_count_].count_3hop = 0;
-                      fi_collection[slot_count_].psf = 0;
-                      fi_collection[slot_count_].locker = 1;
+                      fi_collection[slot_count_][0].busy = SLOT_FREE;
+                      fi_collection[slot_count_][0].sti = 0;
+                      fi_collection[slot_count_][0].count_2hop = 0;
+                      fi_collection[slot_count_][0].count_3hop = 0;
+                      fi_collection[slot_count_][0].psf = 0;
+                      fi_collection[slot_count_][0].locker = 1;
 
-                      fi_collection[slot_num_].busy = SLOT_1HOP;
-                      fi_collection[slot_num_].sti = global_sti;
-                      fi_collection[slot_num_].count_2hop = 1;
-                      fi_collection[slot_num_].count_3hop = 1;
-                      fi_collection[slot_num_].psf = 0;
+                      fi_collection[slot_num_][0].busy = SLOT_1HOP;
+                      fi_collection[slot_num_][0].sti = nodeId_;
+                      fi_collection[slot_num_][0].count_2hop = 1;
+                      fi_collection[slot_num_][0].count_3hop = 1;
+                      fi_collection[slot_num_][0].psf = 0;
 
                       bch_slot_lock_ = 5;
                   }
@@ -2183,13 +1820,13 @@ TdmaSatmac::slotHandler ()
 
           } else {
               continuous_work_fi_ = 0;
-              if (fi_collection[slot_count_].sti == global_sti) {
-                  fi_collection[slot_count_].busy = SLOT_FREE;
-                  fi_collection[slot_count_].sti = 0;
-                  fi_collection[slot_count_].count_2hop = 0;
-                  fi_collection[slot_count_].count_3hop = 0;
-                  fi_collection[slot_count_].psf = 0;
-                  fi_collection[slot_count_].locker = 1;
+              if (fi_collection[slot_count_][0].sti == nodeId_) {
+                  fi_collection[slot_count_][0].busy = SLOT_FREE;
+                  fi_collection[slot_count_][0].sti = 0;
+                  fi_collection[slot_count_][0].count_2hop = 0;
+                  fi_collection[slot_count_][0].count_3hop = 0;
+                  fi_collection[slot_count_][0].psf = 0;
+                  fi_collection[slot_count_][0].locker = 1;
               }
 
               collision_count_++;
@@ -2200,11 +1837,11 @@ TdmaSatmac::slotHandler ()
                   slot_num_ = slot_count_;
                   no_avalible_count_ ++;
                   backoff_frame_num_ = intuniform(0, 20);
-                  //NS_LOG_DEBUG("I'm node "<<global_sti<<", in slot "<<slot_count_<<", NODE_WORK_FI and I cannot choose a BCH!!");
+                  //NS_LOG_DEBUG("I'm node "<<nodeId_<<", in slot "<<slot_count_<<", NODE_WORK_FI and I cannot choose a BCH!!");
                   return;
               }
 
-              //NS_LOG_DEBUG("I'm node "<<global_sti<<", in slot "<<slot_count_<<", NODE_WORK_FI and current bch is unvalid, choose: "<<slot_num_);
+              //NS_LOG_DEBUG("I'm node "<<nodeId_<<", in slot "<<slot_count_<<", NODE_WORK_FI and current bch is unvalid, choose: "<<slot_num_);
               node_state_ = NODE_WAIT_REQUEST;
               return;
           }
@@ -2215,51 +1852,51 @@ TdmaSatmac::slotHandler ()
               fi_collection = this->collected_fi_->slot_describe;
           }
           synthesize_fi_list();
-          if((fi_collection[slot_count_].sti == global_sti && fi_collection[slot_count_].busy == SLOT_1HOP)
-                  || fi_collection[slot_count_].sti == 0)//BCH依然可用
+          if((fi_collection[slot_count_][0].sti == nodeId_ && fi_collection[slot_count_][0].busy == SLOT_1HOP)
+                  || fi_collection[slot_count_][0].sti == 0)//BCH依然可用
           {
-              if ((fi_collection[slot_count_].count_3hop >= fi_collection[slot_adj_candidate_].count_3hop)
-                      && ((fi_collection[slot_adj_candidate_].sti == global_sti && fi_collection[slot_adj_candidate_].busy == SLOT_1HOP)
-                              || fi_collection[slot_adj_candidate_].sti == 0)) //ADJ时隙可用)
+              if ((fi_collection[slot_count_][0].count_3hop >= fi_collection[slot_adj_candidate_][0].count_3hop)
+                      && ((fi_collection[slot_adj_candidate_][0].sti == nodeId_ && fi_collection[slot_adj_candidate_][0].busy == SLOT_1HOP)
+                              || fi_collection[slot_adj_candidate_][0].sti == 0)) //ADJ时隙可用)
               {
                   int oldbch = slot_num_;
                   node_state_ = NODE_WORK_FI;
                   slot_num_ = slot_adj_candidate_;
                   adj_count_success_++;
-                  fi_collection[oldbch].busy = SLOT_FREE;
-                  fi_collection[oldbch].sti = 0;
-                  fi_collection[oldbch].count_2hop = 0;
-                  fi_collection[oldbch].count_3hop = 0;
-                  fi_collection[oldbch].psf = 0;
-                  fi_collection[oldbch].locker = 1;
+                  fi_collection[oldbch][0].busy = SLOT_FREE;
+                  fi_collection[oldbch][0].sti = 0;
+                  fi_collection[oldbch][0].count_2hop = 0;
+                  fi_collection[oldbch][0].count_3hop = 0;
+                  fi_collection[oldbch][0].psf = 0;
+                  fi_collection[oldbch][0].locker = 1;
               } else {
                   node_state_ = NODE_WORK_FI;
-                  fi_collection[slot_adj_candidate_].busy = SLOT_FREE;
-                  fi_collection[slot_adj_candidate_].sti = 0;
-                  fi_collection[slot_adj_candidate_].count_2hop = 0;
-                  fi_collection[slot_adj_candidate_].count_3hop = 0;
-                  fi_collection[slot_adj_candidate_].psf = 0;
-                  fi_collection[slot_adj_candidate_].locker = 1;
+                  fi_collection[slot_adj_candidate_][0].busy = SLOT_FREE;
+                  fi_collection[slot_adj_candidate_][0].sti = 0;
+                  fi_collection[slot_adj_candidate_][0].count_2hop = 0;
+                  fi_collection[slot_adj_candidate_][0].count_3hop = 0;
+                  fi_collection[slot_adj_candidate_][0].psf = 0;
+                  fi_collection[slot_adj_candidate_][0].locker = 1;
               }
 
               generate_send_FI_packet();
           } else { //BCH已经不可用
 
-              if((fi_collection[slot_adj_candidate_].sti == global_sti && fi_collection[slot_adj_candidate_].busy == SLOT_1HOP)
-                      || fi_collection[slot_adj_candidate_].sti == 0) { //ADJ时隙可用
+              if((fi_collection[slot_adj_candidate_][0].sti == nodeId_ && fi_collection[slot_adj_candidate_][0].busy == SLOT_1HOP)
+                      || fi_collection[slot_adj_candidate_][0].sti == 0) { //ADJ时隙可用
                   node_state_ = NODE_WORK_FI;
                   adj_count_success_++;
                   slot_num_ = slot_adj_candidate_;
               } else { //ADJ时隙不可用
                   collision_count_++;
 
-                  if (fi_collection[slot_adj_candidate_].sti == global_sti) {
-                      fi_collection[slot_adj_candidate_].busy = SLOT_FREE;
-                      fi_collection[slot_adj_candidate_].sti = 0;
-                      fi_collection[slot_adj_candidate_].count_2hop = 0;
-                      fi_collection[slot_adj_candidate_].count_3hop = 0;
-                      fi_collection[slot_adj_candidate_].psf = 0;
-                      fi_collection[slot_adj_candidate_].locker = 1;
+                  if (fi_collection[slot_adj_candidate_][0].sti == nodeId_) {
+                      fi_collection[slot_adj_candidate_][0].busy = SLOT_FREE;
+                      fi_collection[slot_adj_candidate_][0].sti = 0;
+                      fi_collection[slot_adj_candidate_][0].count_2hop = 0;
+                      fi_collection[slot_adj_candidate_][0].count_3hop = 0;
+                      fi_collection[slot_adj_candidate_][0].psf = 0;
+                      fi_collection[slot_adj_candidate_][0].locker = 1;
                   }
                   slot_num_ = determine_BCH(0);
                   if(slot_num_ < 0 || slot_num_== slot_count_){
@@ -2279,12 +1916,38 @@ TdmaSatmac::slotHandler ()
           break;
       }
   }
-
   return;
-
 }
 
-} // namespace ns3
+UserTxParams* Satmac::getPreconfiguredTxParams()
+{
+    UserTxParams* txParams = new UserTxParams();
+
+    // default parameters for D2D
+    txParams->isSet() = true;
+    txParams->writeTxMode(SINGLE_ANTENNA_PORT0);
+    Rank ri = 1;                                              // rank for TxD is one
+    txParams->writeRank(ri);
+    txParams->writePmi(intuniform(1, pow(ri, (double) 2)));   // taken from LteFeedbackComputationRealistic::computeFeedback
+
+    BandSet b;
+    for (Band i = 0; i < deployer_->getNumBands(); ++i) b.insert(i);
+    txParams->writeBands(b);
+
+    RemoteSet antennas;
+    antennas.insert(MACRO);
+    txParams->writeAntennas(antennas);
+
+    return txParams;
+}
+
+void Satmac::finish()
+{
+    binder_->removeUeInfo(ueInfo_);
+    delete preconfiguredTxParams_;
+    delete ueInfo_;
+}
+//#endif
 
 
 
