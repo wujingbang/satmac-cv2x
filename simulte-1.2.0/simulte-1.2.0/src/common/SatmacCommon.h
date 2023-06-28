@@ -1,6 +1,6 @@
 #ifndef SATMACCOMMON_H
 #define SATMACCOMMON_H
-
+#include <omnetpp.h>
 //#define PRINT_SLOT_STATUS 1
 
 //#define FRAMEADJ_CUT_RATIO_THS 0.4
@@ -54,11 +54,13 @@ struct slot_tag{
 struct SlotTagForSending{
     char busy;  //2 bit
     int count_2hop;
-    int sti;    // 8 bit
+    int sti;
+    char psf;
     SlotTagForSending(){
         busy=0;
-        sti=0;
+        sti = 0;
         count_2hop = 0;
+        psf = 0;
     }
 };
 
@@ -68,10 +70,11 @@ public:
     int index;  //
     int remain_time;
     int frame_len;
+    int channel_num;
     int valid_time;
     int recv_slot;
     int type;   //type=0 FI, type=1 短包
-    slot_tag *slot_describe;
+    slot_tag **slot_describe;
     Frame_info *next_fi;
 
     Frame_info(){
@@ -81,10 +84,12 @@ public:
         valid_time = 0;
         recv_slot = -1;
         frame_len=0;
+        channel_num = 1;
         type = -1;
     }
-    Frame_info(int framelen){
+    Frame_info(int framelen, int channelNumber){
         ASSERT( framelen >= 0 );
+        ASSERT( channelNumber >= 0 );
         sti = 0;
         index = 0;
         remain_time = 0;
@@ -92,12 +97,22 @@ public:
         recv_slot = -1;
         type = -1;
         frame_len = framelen;
+        channel_num = channelNumber;
         //next_fi = NULL;
-        slot_describe = new slot_tag[frame_len];
+        slot_describe = new slot_tag*[frame_len];
+        for(int i = 0; i < frame_len; i++)
+        {
+            slot_describe[i] = new slot_tag[channel_num];
+        }
+        //slot_describe = new slot_tag[frame_len];
         ASSERT(slot_describe != NULL);
     }
     ~Frame_info(){
         if(slot_describe){
+            for(int i = 0; i < frame_len; i++)
+            {
+                delete[] slot_describe[i];
+            }
             delete[] slot_describe;
             slot_describe = NULL;
         }

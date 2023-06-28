@@ -332,13 +332,13 @@ void LtePhyVUeMode4::handleAirFrame(cMessage* msg)
 
     // 获取坐标
     Coord myCoord = getCoord();
-
     // Only store frames which are within 1500m over this the interference caused is negligible.
     // 仅存储 1500m 以内的帧，在此之上造成的干扰可以忽略不计。
     if (myCoord.distance(lteInfo->getCoord()) < 1500) { //与源UE的距离
         // store frame, together with related control info
         // 存储 frame ，以及相关的控制信息
         frame->setControlInfo(lteInfo);
+
         // Capture the Airframe for decoding later 捕获 Airframe 以便稍后解码
         storeAirFrame(frame);
     } else {

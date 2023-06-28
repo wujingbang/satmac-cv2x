@@ -1,35 +1,48 @@
-#ifdef SATMAC
+//#ifdef LteSATMAC
+//
+//                           SimuLTE
+//
+// This file is part of a software released under the license included in file
+// "license.pdf". This license can be also found at http://www.ltesimulator.com/
+// The above file and the present reference are part of the software itself,
+// and cannot be removed from it.
+//
+// This file is an extension of SimuLTE
+// Author: Brian McCarthy
+// email : b.mccarthy@cs.ucc.ie
+
+
 #include <math.h>
 #include <assert.h>
 #include <algorithm>
 #include <iterator>
 #include <vector>
-#include "stack/phy/layer/LtePhyVUeMode4.h"
+#include "stack/phy/layer/SatPhy.h"
 #include "stack/phy/packet/LteFeedbackPkt.h"
 #include "stack/d2dModeSelection/D2DModeSelectionBase.h"
 #include "stack/phy/packet/SpsCandidateResources.h"
 #include "stack/phy/packet/cbr_m.h"
 
-Define_Module(LtePhyVUeMode4);
+Define_Module(SatPhy);
 
-LtePhyVUeMode4::LtePhyVUeMode4()
+SatPhy::SatPhy()
 {
     handoverStarter_ = NULL;
     handoverTrigger_ = NULL;
 }
 
-LtePhyVUeMode4::~LtePhyVUeMode4()
+SatPhy::~SatPhy()
 {
 }
 
-void LtePhyVUeMode4::initialize(int stage)
+void SatPhy::initialize(int stage)
 {
     if (stage != inet::INITSTAGE_NETWORK_LAYER_2)
         LtePhyUeD2D::initialize(stage);
 
     if (stage == inet::INITSTAGE_LOCAL)
     {
-        adjacencyPSCCHPSSCH_ = par("adjacencyPSCCHPSSCH");
+        adjacencyPSCCHPSSCH_ = true;
         pStep_ = par("pStep");
         selectionWindowStartingSubframe_ = par("selectionWindowStartingSubframe");
         numSubchannels_ = par("numSubchannels");
@@ -121,8 +134,69 @@ void LtePhyVUeMode4::initialize(int stage)
     }
 }
 
-void LtePhyVUeMode4::handleSelfMessage(cMessage *msg)
+void SatPhy::handleSelfMessage(cMessage *msg)
 {
+    if (msg->isName("d2dDecodingTimer")) //解码定时器
+    {
+        std::vector<int> missingTbs;
+        for (int i=0; i<sciFrames_.size(); i++){
+            bool foundTB=false;
+            LteAirFrame* sciFrame = sciFrames_[i];
+            UserControlInfo* sciInfo = check_and_cast<UserControlInfo*>(sciFrame->removeControlInfo());
+            for (int j=0; j<tbFrames_.size();j++){
+                LteAirFrame* tbFrame = tbFrames_[j];
+                UserControlInfo* tbInfo = check_and_cast<UserControlInfo*>(tbFrame->removeControlInfo());
+                if (sciInfo->getSourceId() == tbInfo->getSourceId()){
+                    foundTB = true;
+                    tbFrame->setControlInfo(tbInfo);
+                    break;
+                }
+                tbFrame->setControlInfo(tbInfo);
+            }
+            if (!foundTB){
+                missingTbs.push_back(i);
+            }
+            sciFrame->setControlInfo(sciInfo);
+        }
+
+        while (!sciFrames_.empty()){
+            // Get received SCI and it's corresponding RsrpVector
+            LteAirFrame* frame = sciFrames_.back();
+            std::vector<double> rsrpVector = sciRsrpVectors_.back();
+            std::vector<double> rssiVector = sciRssiVectors_.back();
+            std::vector<double> sinrVector = sciSinrVectors_.back();
+            double attenuation = sciAttenuations_.back();
+
+            // Remove it from the vector
+            sciFrames_.pop_back();
+            sciRsrpVectors_.pop_back();
+            sciRssiVectors_.pop_back();
+            sciSinrVectors_.pop_back();
+            sciAttenuations_.pop_back();
+
+            UserControlInfo* lteInfo = check_and_cast<UserControlInfo*>(frame->removeControlInfo());
+
+            // decode the selected frame
+            decodeAirFrame(frame, lteInfo, rsrpVector, rssiVector, sinrVector, attenuation);
+
+            emit(sciReceived, sciReceived_);
+            emit(sciUnsensed, sciUnsensed_);
+            emit(sciDecoded, sciDecoded_);
+            emit(sciFailedDueToProp, sciFailedDueToProp_);
+            emit(sciFailedDueToInterference, sciFailedDueToInterference_);
+            emit(sciFailedHalfDuplex, sciFailedHalfDuplex_);
+            emit(subchannelReceived, subchannelReceived_);
+            emit(subchannelsUsed, subchannelsUsed_);
+
+            sciReceived_ = 0;
+            sciDecoded_ = 0;
+            sciFailedHalfDuplex_ = 0;
+            sciFailedDueToInterference_ = 0;
+            sciFailedDueToProp_ = 0;
+            subchannelReceived_ = 0;
+            subchannelsUsed_ = 0;
+            sciUnsensed_ = 0;
+        }
         int countTbs = 0;
         if (tbFrames_.empty()){
             for(countTbs; countTbs<missingTbs.size(); countTbs++){
@@ -184,15 +258,19 @@ void LtePhyVUeMode4::handleSelfMessage(cMessage *msg)
             }
             countTbs++;
         }
-
+        std::vector<cPacket*>::iterator it;
+        for(it=scis_.begin();it!=scis_.end();it++)
+        {
+            delete(*it);
+        }
+        scis_.clear();
         delete msg;
-
+        d2dDecodingTimer_ = NULL;
     }
     else if (msg->isName("updateSubframe"))
     {
         transmitting_ = false;
         updateSubframe();
-
         delete msg;
     }
     else
@@ -200,13 +278,13 @@ void LtePhyVUeMode4::handleSelfMessage(cMessage *msg)
 }
 
 // TODO: ***reorganize*** method
-void LtePhyVUeMode4::handleAirFrame(cMessage* msg)
+void SatPhy::handleAirFrame(cMessage* msg)
 {
     UserControlInfo* lteInfo = check_and_cast<UserControlInfo*>(msg->removeControlInfo());
 
     connectedNodeId_ = masterId_;
     LteAirFrame* frame = check_and_cast<LteAirFrame*>(msg);
-    EV << "LtePhyVUeMode4: received new LteAirFrame with ID " << frame->getId() << " from channel" << endl;
+    EV << "SatPhy: received new LteAirFrame with ID " << frame->getId() << " from channel" << endl;
     //Update coordinates of this user 更新坐标
     if (lteInfo->getFrameType() == HANDOVERPKT) // 移交包
     {
@@ -247,14 +325,14 @@ void LtePhyVUeMode4::handleAirFrame(cMessage* msg)
     }
 
     // 获取坐标
-    Coord myCoord = getCoord();
+    inet::Coord myCoord = getCoord();
+
     // Only store frames which are within 1500m over this the interference caused is negligible.
     // 仅存储 1500m 以内的帧，在此之上造成的干扰可以忽略不计。
     if (myCoord.distance(lteInfo->getCoord()) < 1500) { //与源UE的距离
         // store frame, together with related control info
         // 存储 frame ，以及相关的控制信息
         frame->setControlInfo(lteInfo);
-
         // Capture the Airframe for decoding later 捕获 Airframe 以便稍后解码
         storeAirFrame(frame);
     } else {
@@ -263,15 +341,72 @@ void LtePhyVUeMode4::handleAirFrame(cMessage* msg)
     }
 }
 
-void LtePhyVUeMode4::handleUpperMessage(cMessage* msg)
+void SatPhy::handleUpperMessage(cMessage* msg)
 {
-
-    UserControlInfo* lteInfo = check_and_cast<UserControlInfo*>(msg->removeControlInfo());
-
+    UserControlInfo* lteInfo = check_and_cast<UserControlInfo*>(msg->removeControlInfo()); //返回 msg 的控制信息
+    //UserControlInfo* SATMACInfo = lteInfo->dup();
     LteAirFrame* frame;
 
+    if (lteInfo->getFrameType() == GRANTPKT)
+    {
 
-    if (lteInfo->getFrameType() == HARQPKT)
+        SatmacSchedulingGrant* grant = check_and_cast<SatmacSchedulingGrant*>(msg);
+        sciGrant_ = grant;  // 要求生成 SCI 的 grant 包
+        //lteInfo->setUserTxParams(sciGrant_->getUserTxParams()->dup());
+        lteInfo->setGrantedBlocks(sciGrant_->getGrantedBlocks());
+        lteInfo->setTotalGrantedBlocks(sciGrant_->getTotalGrantedBlocks());
+        lteInfo->setDirection(D2D_MULTI);
+        // sendSciMessage 调用了 createSCIMessage 来创建 SCI 并发送
+        availableRBs_ = sendSciMessage(msg, lteInfo);
+
+        SatmacPacket* satmacPkt = new SatmacPacket("SATMAC Message");
+
+        m_frame_len = grant->getFrameLength();
+        m_channel_num = grant->getChannelNumber();
+        int globleSti = grant->getGlobleSti();
+        SlotTag slotTag;
+        for(int i = 0; i < m_frame_len; i++)
+        {
+            std::vector<SlotTagForSending> v;
+            for(int j = 0; j < m_channel_num; j++)
+            {
+                SlotTagForSending stfs;
+                stfs.busy = grant->getSlotTag()[i][j].busy;
+                stfs.sti = grant->getSlotTag()[i][j].sti;
+                stfs.count_2hop = grant->getSlotTag()[i][j].count_2hop;
+                stfs.psf = grant->getSlotTag()[i][j].psf;
+                v.push_back(stfs);
+            }
+            slotTag.push_back(v);
+        }
+        satmacPkt->setFrameLength(m_frame_len);
+        satmacPkt->setChannelNumber(m_channel_num);
+        satmacPkt->setGlobleSti(globleSti);
+        satmacPkt->setSlotTag(slotTag);
+
+        UserControlInfo* SATMACInfo = lteInfo->dup();
+        SATMACInfo->setFrameType(SATMACPKT);
+        SATMACInfo->setGrantedBlocks(fiRbs_);
+        SATMACInfo->setTotalGrantedBlocks(sciGrant_->getTotalGrantedBlocks());
+        frame = new LteAirFrame("satmac-packet");
+        transmitting_ = true;   // 用于模拟半双工，在解码的时候如果本节点在传输中则无法接受数据包
+
+        frame = prepareAirFrame(satmacPkt, SATMACInfo);
+        emit(tbSent, 1);
+        sendBroadcast(frame);
+        delete sciGrant_;
+        delete lteInfo;
+        for (int i=0; i<numSubchannels_; i++)
+        {
+            // Mark all the subchannels as not sensed
+            // 将所有子信道标记为未检测
+            // 像是半双工
+            sensingWindow_[sensingWindowFront_][i]->setSensed(false);
+        }
+
+        return;
+    }
+    else if (lteInfo->getFrameType() == HARQPKT)
     {
         frame = new LteAirFrame("harqFeedback-grant");
     }
@@ -279,12 +414,12 @@ void LtePhyVUeMode4::handleUpperMessage(cMessage* msg)
     // if this is a multicast/broadcast connection, send the frame to all neighbors in the hearing range
     // otherwise, send unicast to the destination
 
-    EV << "LtePhyVUeMode4::handleUpperMessage - " << nodeTypeToA(nodeType_) << " with id " << nodeId_
+    EV << "SatPhy::handleUpperMessage - " << nodeTypeToA(nodeType_) << " with id " << nodeId_
        << " sending message to the air channel. Dest=" << lteInfo->getDestId() << endl;
 
     // Mark that we are in the process of transmitting a packet therefore when we go to decode messages we can mark as failure due to half duplex
     // 标记我们正在传输数据包，因此当我们去解码消息时，我们可以标记为由于半双工而失败
-    transmitting_ = true;
+    transmitting_ = true;   // 用于模拟半双工，在解码的时候如果本节点在传输中则无法接受数据包
 
     lteInfo->setGrantedBlocks(availableRBs_);
 
@@ -292,11 +427,224 @@ void LtePhyVUeMode4::handleUpperMessage(cMessage* msg)
 
     emit(tbSent, 1);
 
-    sendBroadcast(frame);
 
+    if (lteInfo->getDirection() == D2D_MULTI)
+        sendBroadcast(frame);
+    else
+        sendUnicast(frame);
 }
 
-LteAirFrame* LtePhyVUeMode4::prepareAirFrame(cMessage* msg, UserControlInfo* lteInfo){
+RbMap SatPhy::sendSciMessage(cMessage* msg, UserControlInfo* lteInfo)
+{
+    RbMap rbMap = lteInfo->getGrantedBlocks();
+    UserControlInfo* SCIInfo = lteInfo->dup();
+    LteAirFrame* frame = NULL;
+
+    RbMap sciRbs;
+    RbMap allRbs = rbMap;
+    if (adjacencyPSCCHPSSCH_) //是邻接结构的信道
+    {
+        // Adjacent mode
+
+        // Setup so SCI gets 2 RBs from the grantedBlocks.
+        RbMap::iterator it;
+        std::map<Band, unsigned int>::iterator jt;
+        // for each Remote unit used to transmit the packet
+        // 对于用于传输数据包的每个远程单元
+        int allocatedBlocks = 0;
+        for (it = rbMap.begin(); it != rbMap.end(); ++it)
+        {
+            if (allocatedBlocks == 2)
+            {
+                break;
+            }
+            // for each logical band used to transmit the packet
+            // 对于用于传输数据包的每个逻辑频带
+            for (jt = it->second.begin(); jt != it->second.end(); ++jt)
+            {
+                Band band = jt->first;
+
+                if (allocatedBlocks == 2)
+                {
+                    // Have all the blocks allocated to the SCI so can move on.
+                    // 将所有块分配给 SCI，以便继续前进
+                    break;
+                }
+
+                if (jt->second == 0) // this Rb is not allocated
+                    continue;
+                else
+                {
+                    // RB is allocated to grant, now give it to the SCI.
+                    if (jt->second == 1){
+                        jt->second = 0;
+                        sciRbs[it->first][band] = 1;
+                        ++allocatedBlocks;
+                    }
+                }
+            }
+        }
+    }
+    else
+    {
+        // Non-Adjacent mode
+
+        // Take 2 rbs from the inital RBs available to nodes.
+        int startingRB = sciGrant_->getStartingSubchannel() * 2;
+
+        for (Band b = startingRB; b <= startingRB + 1 ; b++)
+        {
+            sciRbs[MACRO][b] = 1;
+            allRbs[MACRO][b] = 1;
+        }
+    }
+
+    // Store the RBs used for transmission. For interference computation
+    // 存储用于传输的 RB。 用于介入计算
+    UsedRBs info;
+    info.time_ = NOW;
+    info.rbMap_ = allRbs;
+
+    usedRbs_.push_back(info);
+
+    std::vector<UsedRBs>::iterator it = usedRbs_.begin();
+    while (it != usedRbs_.end())  // purge old allocations
+    {
+        if (it->time_ < NOW - 0.002)
+            usedRbs_.erase(it++);
+        else
+            ++it;
+    }
+    lastActive_ = NOW;
+
+    SCIInfo->setFrameType(SCIPKT);
+    SCIInfo->setGrantedBlocks(sciRbs);
+    SCIInfo->setTotalGrantedBlocks(sciGrant_->getTotalGrantedBlocks());
+    //SCIInfo->setGrantStartTime(sciGrant_->getStartTime());
+    fiRbs_ = sciRbs;
+    /*
+     * Need to prepare the airframe were sending
+     * Ensure that it will fit into it's grant
+     * if not don't send anything except a break reservation message
+     */
+    EV << NOW << " SatPhy::handleUpperMessage - message from stack" << endl;
+
+    // create LteAirFrame and encapsulate the received packet
+    // 封装接收的数据包
+    SidelinkControlInformation* SCI = createSCIMessage();
+    LteAirFrame* sciFrame = prepareAirFrame(SCI, SCIInfo);
+
+    emit(sciSent, 1);
+    emit(subchannelSent, sciGrant_->getStartingSubchannel());
+    emit(subchannelsUsedToSend, sciGrant_->getNumSubchannels());
+    //sendBroadcast(sciFrame);
+
+    //simtime_t t = sciFrame->getSendingTime();
+    //delete sciGrant_;
+    //delete lteInfo;
+
+    return (rbMap);
+}
+
+
+SidelinkControlInformation* SatPhy::createSCIMessage()
+{
+    EV << NOW << " SatPhy::createSCIMessage - Start creating SCI..." << endl;
+
+    //SidelinkControlInformation .msg 类型的消息
+    SidelinkControlInformation* sci = new SidelinkControlInformation("SCI Message");
+
+    /*
+     * Priority (based on upper layer)
+     * 0-7
+     * Mapping unknown, so possibly just take the priority max and min and map to 0-7
+     * This needs to be integrated from the application layer.
+     * Will take this from the scheduling grant.
+     */
+    //sci->setPriority(sciGrant_->getSpsPriority());
+
+    /* Resource Interval
+     *
+     * 0 -> 16
+     * 0 = not reserved
+     * 1 = 100ms (1) RRI [Default]
+     * 2 = 200ms (2) RRI
+     * ...
+     * 10 = 1000ms (10) RRI
+     * 11 = 50ms (0.5) RRI
+     * 12 = 20ms (0.2) RRI
+     * 13 - 15 = Reserved
+     *
+     */
+    // rri设置成帧长
+
+    sci->setResourceReservationInterval(m_frame_len);
+
+    /* frequency Resource Location
+     * Based on another parameter RIV
+     * but size is
+     * Log2(Nsubchannel(Nsubchannel+1)/2) (rounded up)
+     * 0 - 8 bits
+     * 0 - 256 different values
+     *
+     * Based on TS36.213 14.1.1.4C
+     *     if SubchannelLength -1 < numSubchannels/2
+     *         RIV = numSubchannels(SubchannelLength-1) + subchannelIndex
+     *     else
+     *         RIV = numSubchannels(numSubchannels-SubchannelLength+1) + (numSubchannels-1-subchannelIndex)
+     */
+    unsigned int riv;
+    //
+    if (sciGrant_->getNumSubchannels() -1 <= (numSubchannels_/2))
+    {
+        // RIV calculation for less than half+1
+        riv = ((numSubchannels_ * (sciGrant_->getNumSubchannels() - 1)) + sciGrant_->getStartingSubchannel());
+    }
+    else
+    {
+        // RIV calculation for more than half size
+        riv = ((numSubchannels_ * (numSubchannels_ - sciGrant_->getNumSubchannels() + 1)) + (numSubchannels_ - 1 - sciGrant_->getStartingSubchannel()));
+    }
+
+    sci->setFrequencyResourceLocation(riv);
+
+    /* TimeGapRetrans
+     * 1 - 15
+     * ms from init to retrans
+     */
+    sci->setTimeGapRetrans(sciGrant_->getTimeGapTransRetrans());
+
+
+    /* mcs
+     * 5 bits
+     * 26 combos
+     * Technically the MAC layer determines the MCS that it wants the message sent with and as such it will be in the packet
+     */
+    sci->setMcs(sciGrant_->getMcs());
+
+    /* retransmissionIndex
+     * 0 / 1
+     * if 0 retrans is in future/this is the first transmission
+     * if 1 retrans is in the past/this is the retrans
+     */
+    if (sciGrant_->getRetransmission())
+    {
+        sci->setRetransmissionIndex(1);
+    }
+    else
+    {
+        sci->setRetransmissionIndex(0);
+    }
+
+    /* Filler up to 32 bits
+     * Can just set the length to 32 bits and ignore the issue of adding filler
+     */
+    sci->setBitLength(32);
+
+    return sci;
+}
+
+LteAirFrame* SatPhy::prepareAirFrame(cMessage* msg, UserControlInfo* lteInfo){
     // Helper function to prepare airframe for sending.
     LteAirFrame* frame = new LteAirFrame("airframe");
 
@@ -313,7 +661,7 @@ LteAirFrame* LtePhyVUeMode4::prepareAirFrame(cMessage* msg, UserControlInfo* lte
     return frame;
 }
 
-void LtePhyVUeMode4::storeAirFrame(LteAirFrame* newFrame)
+void SatPhy::storeAirFrame(LteAirFrame* newFrame)
 {
     // implements the capture effect
     // store the frame received from the nearest transmitter
@@ -347,15 +695,18 @@ void LtePhyVUeMode4::storeAirFrame(LteAirFrame* newFrame)
     }
 }
 
-void LtePhyVUeMode4::decodeAirFrame(LteAirFrame* frame, UserControlInfo* lteInfo, std::vector<double> &rsrpVector, std::vector<double> &rssiVector, std::vector<double> &sinrVector, double &attenuation)
+void SatPhy::decodeAirFrame(LteAirFrame* frame, UserControlInfo* lteInfo, std::vector<double> &rsrpVector, std::vector<double> &rssiVector, std::vector<double> &sinrVector, double &attenuation)
 {
     EV << NOW << " LtePhyVUeMode4::decodeAirFrame - Start decoding..." << endl;
 
     // apply decider to received packet
-    bool interference_result = false;
+    // 对接收到的数据包应用判定器
+    bool interference_result = false;   // 接入结果
     bool prop_result = false;
 
-    RemoteSet r = lteInfo->getUserTxParams()->readAntennaSet();
+    // UserTxParams：此类指定传输模式和用户用于传输的资源。
+    // readAntennaSet() 获取远程天线集合
+    RemoteSet r = lteInfo->getUserTxParams()->readAntennaSet(); // 应该是一跳邻居节点
     if (r.size() > 1)
     {
         // DAS
@@ -397,7 +748,7 @@ void LtePhyVUeMode4::decodeAirFrame(LteAirFrame* frame, UserControlInfo* lteInfo
             double erfParam = (lteInfo->getD2dTxPower() - attenuation - -90.5) / (3 * sqrt(2));
             double erfValue = erf(erfParam);
             double packetSensingRatio = 0.5 * (1 + erfValue);
-            double er = dblrand(1);
+            double er = dblrand(1); // 返回一个0-1的double随机数
 
             if (er >= packetSensingRatio){
                 // Packet was not sensed so mark as such and delete it.
@@ -406,6 +757,7 @@ void LtePhyVUeMode4::decodeAirFrame(LteAirFrame* frame, UserControlInfo* lteInfo
                 delete pkt;
             } else {
 
+                // 根据所使用的mcs、txmode和接收功率计算发送数据包的错误概率，然后它抛出一个随机数，以检查该数据包是否会被损坏
                 prop_result = channelModel_->error_Mode4(frame, lteInfo, rsrpVector, sinrVector, 0, false);
                 interference_result = channelModel_->error_Mode4(frame, lteInfo, rsrpVector, sinrVector, 0, true);
 
@@ -583,9 +935,43 @@ void LtePhyVUeMode4::decodeAirFrame(LteAirFrame* frame, UserControlInfo* lteInfo
        << (interference_result ? "RECEIVED" : "NOT RECEIVED") << endl;
 }
 
-std::tuple<int,int> LtePhyVUeMode4::decodeRivValue(SidelinkControlInformation* sci, UserControlInfo* sciInfo)
+void SatPhy::updateSubframe()
 {
-    EV << NOW << " LtePhyVUeMode4::decodeRivValue - Decoding RIV value of SCI allows correct placement in sensing window..." << endl;
+    // Increment the pointer to the next element in the sensingWindow
+    // 将指针递增到 sensingWindow 中的下一个元素
+    if (sensingWindowFront_ < (10*pStep_)-1) {
+        ++sensingWindowFront_;
+    }
+    else{
+        // Front has gone over the end of the sensing window reset it.
+        sensingWindowFront_ = 0;
+    }
+
+
+    // First find the subframe that we want to look at i.e. the front one I imagine
+    // If the front isn't occupied then skip on
+    // If it is occupied, pop it off, update it and push it back
+    // All good then.
+
+    std::vector<Subchannel*> subframe = sensingWindow_[sensingWindowFront_];
+
+    if (subframe.at(0)->getSubframeTime() <= NOW - SimTime(10*pStep_, SIMTIME_MS) - TTI) //每过1000ms要重置每帧的时间
+    {
+        std::vector<Subchannel*>::iterator it;
+        for (it=subframe.begin(); it!=subframe.end(); it++)
+        {
+            (*it)->reset(NOW - TTI);
+        }
+    }
+
+    cMessage* updateSubframe = new cMessage("updateSubframe");
+    updateSubframe->setSchedulingPriority(0);        // Generate the subframe at start of next TTI
+    scheduleAt(NOW + TTI, updateSubframe); // 每过一个TTI，发送一个updateSubframe
+}
+
+std::tuple<int,int> SatPhy::decodeRivValue(SidelinkControlInformation* sci, UserControlInfo* sciInfo)
+{
+    EV << NOW << " SatPhy::decodeRivValue - Decoding RIV value of SCI allows correct placement in sensing window..." << endl;
     //UserControlInfo* lteInfo = check_and_cast<UserControlInfo*>(pkt->removeControlInfo());
     RbMap rbMap = sciInfo->getGrantedBlocks();
     RbMap::iterator it;
@@ -649,42 +1035,7 @@ std::tuple<int,int> LtePhyVUeMode4::decodeRivValue(SidelinkControlInformation* s
     return std::make_tuple(subchannelIndex, lengthInSubchannels);
 }
 
-
-void LtePhyVUeMode4::updateSubframe()
-{
-    // Increment the pointer to the next element in the sensingWindow
-    // 将指针递增到 sensingWindow 中的下一个元素
-    if (sensingWindowFront_ < (10*pStep_)-1) {
-        ++sensingWindowFront_;
-    }
-    else{
-        // Front has gone over the end of the sensing window reset it.
-        sensingWindowFront_ = 0;
-    }
-
-
-    // First find the subframe that we want to look at i.e. the front one I imagine
-    // If the front isn't occupied then skip on
-    // If it is occupied, pop it off, update it and push it back
-    // All good then.
-
-    std::vector<Subchannel*> subframe = sensingWindow_[sensingWindowFront_];
-
-    if (subframe.at(0)->getSubframeTime() <= NOW - SimTime(10*pStep_, SIMTIME_MS) - TTI) //每过1000ms要重置每帧的时间
-    {
-        std::vector<Subchannel*>::iterator it;
-        for (it=subframe.begin(); it!=subframe.end(); it++)
-        {
-            (*it)->reset(NOW - TTI);
-        }
-    }
-
-    cMessage* updateSubframe = new cMessage("updateSubframe");
-    updateSubframe->setSchedulingPriority(0);        // Generate the subframe at start of next TTI
-    scheduleAt(NOW + TTI, updateSubframe); // 每过一个TTI，发送一个updateSubframe
-}
-
-void LtePhyVUeMode4::initialiseSensingWindow()
+void SatPhy::initialiseSensingWindow()
 {
     EV << NOW << " LtePhyVUeMode4::initialiseSensingWindow - creating subframes to be added to sensingWindow..." << endl;
 
@@ -699,6 +1050,11 @@ void LtePhyVUeMode4::initialiseSensingWindow()
         subframe.reserve(numSubchannels_); // 为每帧预留 numSubchannels_ 的子信道数量
         Band band = 0;
 
+        if (!adjacencyPSCCHPSSCH_)
+        {
+            // This assumes the bands only every have 1 Rb (which is fine as that appears to be the case)
+            band = numSubchannels_*2;
+        }
         for (int i = 0; i < numSubchannels_; i++) {
             Subchannel *currentSubchannel = new Subchannel(subchannelSize_, subframeTime);
             // Need to determine the RSRP and RSSI that corresponds to background noise
@@ -733,7 +1089,7 @@ void LtePhyVUeMode4::initialiseSensingWindow()
     scheduleAt(NOW + TTI, updateSubframe);
 }
 
-int LtePhyVUeMode4::translateIndex(int fallBack) {
+int SatPhy::translateIndex(int fallBack) {
     if (fallBack > sensingWindowFront_){
         int max = 10 * pStep_;
         int fromMax = fallBack - sensingWindowFront_;
@@ -743,7 +1099,7 @@ int LtePhyVUeMode4::translateIndex(int fallBack) {
     }
 }
 
-void LtePhyVUeMode4::finish()
+void SatPhy::finish()
 {
     if (getSimulation()->getSimulationStage() != CTX_FINISH)
     {
@@ -773,10 +1129,5 @@ void LtePhyVUeMode4::finish()
             delete (*jt);
         }
     }
-    sensingWindow_.clear();
 }
-
-
-
-
-#endif
+//#endif

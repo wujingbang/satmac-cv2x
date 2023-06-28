@@ -1,0 +1,7 @@
+<launch>
+  <basedir path="/home/cxy/OpenCV2X/simulte-1.2.0/simulations/Mode4/highway/fast"/>
+  <copy file="fast.net.xml"/>
+  <copy file="fast.rou.xml"/>
+  <copy file="rerouters.add.xml"/>
+  <copy file="fast.sumo.cfg" type="config"/>
+</launch>

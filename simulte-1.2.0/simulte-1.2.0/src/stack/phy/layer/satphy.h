@@ -1,17 +1,20 @@
-#ifdef SATMAC
-
+//#ifdef LteSATMAC
 #include "stack/phy/layer/LtePhyUeD2D.h"
 #include "stack/phy/packet/SidelinkControlInformation_m.h"
+#include "stack/phy/packet/SatmacPacket_m.h"
 #include "stack/mac/packet/LteSchedulingGrant.h"
 #include "stack/mac/allocator/LteAllocationModule.h"
 #include "stack/phy/layer/Subchannel.h"
 #include <unordered_map>
-
-class LtePhyVUeMode4 : public LtePhyUeD2D
+#include <stack/mac/packet/SatmacSchedulingGrant.h>
+#include "common/SatmacCommon.h"
+class SatPhy : public LtePhyUeD2D
 {
-  protected:
+protected:
 
     // D2D Tx Power
+    int m_frame_len;
+    int m_channel_num;
     double d2dTxPower_;
 
     bool adjacencyPSCCHPSSCH_;
@@ -38,7 +41,9 @@ class LtePhyVUeMode4 : public LtePhyUeD2D
 
     std::vector<std::vector<Subchannel*>> sensingWindow_;
     int sensingWindowFront_;
-    LteMode4SchedulingGrant* sciGrant_;
+    SatmacSchedulingGrant* sciGrant_;
+    SatmacSchedulingGrant* satmacGrant_;
+
     std::vector<std::vector<double>> sciRsrpVectors_;
     std::vector<std::vector<double>> sciRssiVectors_;
     std::vector<std::vector<double>> sciSinrVectors_;
@@ -96,12 +101,12 @@ class LtePhyVUeMode4 : public LtePhyUeD2D
     int sciUnsensed_;
 
     RbMap availableRBs_;
-
+    RbMap fiRbs_;
     LteAllocationModule* allocator_;
 
     void storeAirFrame(LteAirFrame* newFrame);
     LteAirFrame* extractAirFrame();
-    void decodeAirFrame(LteAirFrame* frame, UserControlInfo* lteInfo, std::vector<double> &rsrpVector, std::vector<double> &rssiVector, std::vector<double> &sinrVector, double &attenuation);
+    //void decodeAirFrame(LteAirFrame* frame, UserControlInfo* lteInfo, std::vector<double> &rsrpVector, std::vector<double> &rssiVector, std::vector<double> &sinrVector, double &attenuation);
     // ---------------------------------------------------------------- //
 
     virtual void initialize(int stage);
@@ -110,22 +115,21 @@ class LtePhyVUeMode4 : public LtePhyUeD2D
     virtual void handleUpperMessage(cMessage* msg);
     virtual void handleSelfMessage(cMessage *msg);
 
+    void decodeAirFrame(LteAirFrame* frame, UserControlInfo* lteInfo, std::vector<double> &rsrpVector, std::vector<double> &rssiVector, std::vector<double> &sinrVector, double &attenuation);
+
     // Helper function which prepares a frame for sending
     virtual LteAirFrame* prepareAirFrame(cMessage* msg, UserControlInfo* lteInfo);
 
     // Generate an SCI message corresponding to a Grant
     virtual SidelinkControlInformation* createSCIMessage();
 
-    // Compute Candidate Single Subframe Resources which the MAC layer can use for transmission
-    virtual void computeCSRs(LteMode4SchedulingGrant* &grant);
-
     virtual void updateSubframe();
 
-    virtual std::vector<std::tuple<double, int, int>> selectBestRSSIs(std::unordered_map<int, std::set<int>> possibleCSRs, LteMode4SchedulingGrant* &grant, int totalPossibleCSRs);
+    // Compute Candidate Single Subframe Resources which the MAC layer can use for transmission
+
+    //virtual std::vector<std::tuple<double, int, int>> selectBestRSSIs(std::unordered_map<int, std::set<int>> possibleCSRs, LteMode4SchedulingGrant* &grant, int totalPossibleCSRs);
 
     virtual std::tuple<int,int> decodeRivValue(SidelinkControlInformation* sci, UserControlInfo* sciInfo);
-
-    virtual void updateCBR();
 
     virtual RbMap sendSciMessage(cMessage* sci, UserControlInfo* lteInfo);
 
@@ -134,8 +138,8 @@ class LtePhyVUeMode4 : public LtePhyUeD2D
     virtual int translateIndex(int index);
 
   public:
-    LtePhyVUeMode4();
-    virtual ~LtePhyVUeMode4();
+    SatPhy();
+    virtual ~SatPhy();
 
     virtual double getTxPwr(Direction dir = UNKNOWN_DIRECTION)
     {
@@ -143,10 +147,6 @@ class LtePhyVUeMode4 : public LtePhyUeD2D
             return d2dTxPower_;
         return txPower_;
     }
+
 };
-
-
-
-
-
-#endif
+//#endif

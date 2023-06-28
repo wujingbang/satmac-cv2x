@@ -202,6 +202,19 @@ module LteNicUeD2D extends LteNicIpBase
 }
 
 //
+// Satmac D2D User Equipment of LTE stack
+//
+module LteNicSatmac extends LteNicNonIpBase
+{
+    parameters:
+        LtePdcpRrcType = "LtePdcpRrcUeD2D";
+        LteMacType = "Satmac";
+        LtePhyType = "SatPhy";
+        
+        string d2dPeerAddresses = default(""); // list of D2D peer UEs, separated by blank spaces
+}
+
+//
 // Mode 4 D2D User Equipment of LTE stack
 //
 module LteNicVUeMode4 extends LteNicNonIpBase
@@ -211,7 +224,9 @@ module LteNicVUeMode4 extends LteNicNonIpBase
         LteMacType = default("LteMacVUeMode4");
         LtePhyType = "LtePhyVUeMode4";
         
+
         string d2dPeerAddresses = default(""); // list of D2D peer UEs, separated by blank spaces
+
 }
 
 //

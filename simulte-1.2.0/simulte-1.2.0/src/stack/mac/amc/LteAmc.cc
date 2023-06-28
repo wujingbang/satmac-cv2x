@@ -10,7 +10,7 @@
 #include "stack/mac/amc/LteAmc.h"
 #include "stack/mac/layer/LteMacEnb.h"
 #include "stack/mac/layer/LteMacVUeMode4.h"
-
+#include "stack/mac/layer/Satmac.h"
 // NOTE: AMC Pilots header file inclusions must go here
 #include "stack/mac/amc/AmcPilotAuto.h"
 #include "stack/mac/amc/AmcPilotD2D.h"
@@ -206,7 +206,8 @@ LteAmc::LteAmc(LteMacBase *mac, LteBinder *binder, LteDeployer *deployer, int nu
     }
     else
     {
-        mac_ = dynamic_cast<LteMacVUeMode4*>(mac);
+        //mac_ = dynamic_cast<LteMacVUeMode4*>(mac);
+        mac_ = dynamic_cast<Satmac*>(mac);
     }
     binder_ = binder;
     deployer_ = deployer;

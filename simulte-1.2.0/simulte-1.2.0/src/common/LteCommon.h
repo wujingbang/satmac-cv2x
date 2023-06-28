@@ -66,7 +66,7 @@ class ExtCell;
 #define UE_MAX_ID 65535
 
 /// Max Number of Codewords
-#define MAX_CODEWORDS 2
+#define MAX_CODEWORDS 1
 
 // Number of QCI classes
 #define LTE_QCI_CLASSES 9
@@ -465,7 +465,8 @@ enum LtePhyFrameType
     RACPKT,
     D2DMODESWITCHPKT,
     SCIPKT,
-    UNKNOWN_TYPE
+    UNKNOWN_TYPE,
+    SATMACPKT,
 };
 
 struct LtePhyFrameTable
@@ -663,6 +664,7 @@ typedef std::map<MacCid, LteMacBuffer*> LteMacBufferMap;
 /**
  * This is the Schedule list, a list of schedule elements.
  * For each CID on each codeword there is a number of SDUs
+ * 对于每个码字上的每个CID，都有许多SDU
  */
 typedef std::map<std::pair<MacCid, Codeword>, unsigned int> LteMacScheduleList;
 
